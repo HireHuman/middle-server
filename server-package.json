@@ -1,0 +1,14 @@
+{
+  "name": "middle-story-generator",
+  "version": "1.0.0",
+  "description": "Daily story generator for MIDDLE app — calls grok-3 and saves to Firestore",
+  "main": "generate.js",
+  "scripts": {
+    "start": "node generate.js",
+    "generate": "node generate.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}
