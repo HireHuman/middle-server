@@ -39,131 +39,116 @@ function encodeValue(v) {
 }
 
 // ─── Reddit ───────────────────────────────────────────────────────────────────
+// Strictly separated left/right fetching with relevance validation
+
+// Left-leaning subreddits only
+const LEFT_SUBS = [
+  "politics", "news", "worldnews", "progressive",
+  "democrats", "Liberal", "AnythingGoesNews", "uspolitics"
+];
+
+// Right-leaning subreddits only — completely separate list
+const RIGHT_SUBS = [
+  "conservative", "Republican", "AskConservatives",
+  "Libertarian", "PoliticsRight", "republicans", "AmericanPolitics"
+];
+
+// Check if a post title is relevant to the story
+function isRelevant(postTitle, searchQuery) {
+  if (!postTitle || !searchQuery) return false;
+  const title = postTitle.toLowerCase();
+  const keywords = searchQuery.toLowerCase()
+    .split(" ")
+    .filter(w => w.length > 3); // ignore short words
+  // Post must contain at least 2 keywords from the search query
+  const matches = keywords.filter(kw => title.includes(kw));
+  return matches.length >= Math.min(2, keywords.length);
+}
+
+async function fetchSideRedditPosts(searchQuery, topic, subs, side) {
+  const headers = { "User-Agent": "MIDDLE-App/1.0 (contact@themiddle.app)" };
+  const allPosts = [];
+  const seen = new Set();
+
+  // Search each subreddit specifically
+  await Promise.all(subs.map(async sub => {
+    try {
+      // Try both "top" and "relevance" sort to get more results
+      const [topRes, relRes] = await Promise.all([
+        fetch(`https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(searchQuery)}&sort=top&t=month&limit=10`, { headers }),
+        fetch(`https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(searchQuery)}&sort=relevance&t=month&limit=10`, { headers }),
+      ]);
+
+      for (const res of [topRes, relRes]) {
+        if (!res.ok) continue;
+        const data = await res.json();
+        const posts = (data?.data?.children || []).map(c => c.data);
+        for (const p of posts) {
+          if (!seen.has(p.id) && p.score > 5) {
+            seen.add(p.id);
+            allPosts.push(p);
+          }
+        }
+      }
+    } catch(e) {
+      console.warn(`  Reddit r/${sub} failed: ${e.message}`);
+    }
+  }));
+
+  // Filter for relevance — post title must contain story keywords
+  const relevant = allPosts.filter(p => isRelevant(p.title, searchQuery));
+  console.log(`  Reddit ${side}: ${allPosts.length} total, ${relevant.length} relevant`);
+
+  // Sort by score, take top 5
+  const top = relevant
+    .sort((a,b) => b.score - a.score)
+    .slice(0, 5);
+
+  // Format posts
+  const formatted = top.map((p, i) => ({
+    id: `${side[0]}${i+1}`,
+    handle: `r/${p.subreddit}`,
+    source: "Reddit",
+    avatar: p.subreddit[0].toUpperCase(),
+    text: p.title,
+    likes: p.score,
+    reposts: p.num_comments,
+    url: `https://reddit.com${p.permalink}`,
+    searchQuery,
+    thread: p.selftext?.length > 20
+      ? [{ avatar:"R", handle:`u/${p.author}`, text:p.selftext.slice(0,280), likes:Math.floor(p.score*0.25) }]
+      : []
+  }));
+
+  // Pad to 5 with subreddit search links if not enough relevant posts
+  const fallbackSub  = side === "left" ? "politics" : "conservative";
+  const fallbackUrl  = `https://www.reddit.com/r/${fallbackSub}/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=month`;
+  while (formatted.length < 5) {
+    formatted.push({
+      id: `${side[0]}${formatted.length+1}`,
+      handle: `r/${fallbackSub}`,
+      source: "Reddit",
+      avatar: fallbackSub[0].toUpperCase(),
+      text: `See more ${side} Reddit discussions about: ${topic}`,
+      likes: 0, reposts: 0,
+      url: fallbackUrl,
+      searchQuery, thread: []
+    });
+  }
+
+  return formatted;
+}
+
 async function fetchRedditPosts(searchQuery, topic) {
   console.log(`  Reddit: "${searchQuery}"`);
-  const headers = { "User-Agent": "MIDDLE-App/1.0 (contact@themiddle.app)" };
 
-  // Search a subreddit — try multiple sort methods to get more unique posts
-  async function searchSub(sub, query, sort="top", time="week") {
-    try {
-      const res = await fetch(
-        `https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(query)}&sort=${sort}&t=${time}&limit=10`,
-        { headers }
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data?.data?.children || []).map(c => c.data).filter(p => p.score > 10);
-    } catch(e) { return []; }
-  }
-
-  // Also search all of Reddit (not just specific subs) filtered by flair/community
-  async function searchAllReddit(query, sort="top") {
-    try {
-      const res = await fetch(
-        `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&sort=${sort}&t=week&limit=25`,
-        { headers }
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data?.data?.children || []).map(c => c.data).filter(p => p.score > 10);
-    } catch(e) { return []; }
-  }
-
-  // Left-leaning subreddits
-  const leftSubs = [
-    "politics", "news", "worldnews", "progressive",
-    "democrats", "Liberal", "ActivelyProgressive", "TrueOffMyChest"
-  ];
-
-  // Right-leaning subreddits  
-  const rightSubs = [
-    "conservative", "Republican", "NeutralPolitics",
-    "Libertarian", "PoliticsRight", "AskConservatives", "republicans"
-  ];
-
-  // Fetch from all sources in parallel
-  const [leftSubResults, rightSubResults, allRedditTop, allRedditNew] = await Promise.all([
-    Promise.all(leftSubs.map(s => searchSub(s, searchQuery, "top", "week"))),
-    Promise.all(rightSubs.map(s => searchSub(s, searchQuery, "top", "week"))),
-    searchAllReddit(searchQuery, "top"),
-    searchAllReddit(searchQuery, "relevance"),
+  // Fetch left and right completely independently — no shared results
+  const [leftPosts, rightPosts] = await Promise.all([
+    fetchSideRedditPosts(searchQuery, topic, LEFT_SUBS,  "left"),
+    fetchSideRedditPosts(searchQuery, topic, RIGHT_SUBS, "right"),
   ]);
 
-  // Classify all-reddit posts by subreddit lean
-  const leftLeaning  = new Set(leftSubs.map(s => s.toLowerCase()));
-  const rightLeaning = new Set(rightSubs.map(s => s.toLowerCase()));
-
-  const allLeft  = [...leftSubResults.flat()];
-  const allRight = [...rightSubResults.flat()];
-
-  // Add all-reddit posts to appropriate bucket based on subreddit
-  for (const post of [...allRedditTop, ...allRedditNew]) {
-    const sub = post.subreddit?.toLowerCase();
-    if (leftLeaning.has(sub))  allLeft.push(post);
-    else if (rightLeaning.has(sub)) allRight.push(post);
-  }
-
-  // Deduplicate by post ID, sort by score, take top 5 per side
-  function dedupeAndSort(posts, limit=5) {
-    const seen = new Set();
-    return posts
-      .filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; })
-      .sort((a,b) => b.score - a.score)
-      .slice(0, limit);
-  }
-
-  const topLeft  = dedupeAndSort(allLeft,  5);
-  const topRight = dedupeAndSort(allRight, 5);
-
-  function formatPost(post, side, index) {
-    return {
-      id: `${side[0]}${index+1}`,
-      handle: `r/${post.subreddit}`,
-      source: "Reddit",
-      avatar: post.subreddit[0].toUpperCase(),
-      text: post.title,
-      likes: post.score,
-      reposts: post.num_comments,
-      url: `https://reddit.com${post.permalink}`,
-      searchQuery,
-      thread: post.selftext?.length > 20
-        ? [{
-            avatar: "R",
-            handle: `u/${post.author}`,
-            text: post.selftext.slice(0, 280),
-            likes: Math.floor(post.score * 0.25)
-          }]
-        : []
-    };
-  }
-
-  let leftPosts  = topLeft.map((p,i)  => formatPost(p, "left",  i));
-  let rightPosts = topRight.map((p,i) => formatPost(p, "right", i));
-
-  // Pad to 5 with search links if not enough real posts
-  while (leftPosts.length < 5) {
-    leftPosts.push({
-      id: `l${leftPosts.length+1}`,
-      handle: "r/politics", source: "Reddit", avatar: "P",
-      text: `Browse Reddit discussions: ${topic}`,
-      likes: 0, reposts: 0,
-      url: `https://www.reddit.com/r/politics/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=week`,
-      searchQuery, thread: []
-    });
-  }
-
-  while (rightPosts.length < 5) {
-    rightPosts.push({
-      id: `r${rightPosts.length+1}`,
-      handle: "r/conservative", source: "Reddit", avatar: "C",
-      text: `Browse Reddit discussions: ${topic}`,
-      likes: 0, reposts: 0,
-      url: `https://www.reddit.com/r/conservative/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=week`,
-      searchQuery, thread: []
-    });
-  }
-
-  console.log(`  Reddit: ${leftPosts.length}L ${rightPosts.length}R posts`);
+  console.log(`  Reddit final: ${leftPosts.length}L ${rightPosts.length}R`);
   return { leftPosts, rightPosts };
 }
 
