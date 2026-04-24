@@ -571,6 +571,8 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error("❌ Failed:", err);
-  process.exit(1);
+  console.error("❌ Failed:", err.message || err);
+  // Exit with code 0 so Railway doesn't immediately restart
+  // A cron job should not retry on failure — wait for next scheduled run
+  process.exit(0);
 });
