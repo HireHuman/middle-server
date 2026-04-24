@@ -210,16 +210,16 @@ JSON shape:
   "commonGround":["value1","value2","value3","value4","value5"],
   "conclusion":"3-4 paragraph Birds Eye View editorial.",
   "factChecks":[
-    {"claim":"Right claim","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":18400},
-    {"claim":"Left claim","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":14200},
-    {"claim":"Right claim","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":22800},
-    {"claim":"Left claim","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":16400},
-    {"claim":"Right claim","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":11200},
-    {"claim":"Left claim","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":19800},
-    {"claim":"Right claim","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":13400},
-    {"claim":"Left claim","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":9800},
-    {"claim":"Right claim","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":21200},
-    {"claim":"Left claim","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":12800}
+    {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence supporting or refuting this claim.","likes":18400},
+    {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":14200},
+    {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of evidence.","likes":22800},
+    {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":16400},
+    {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of evidence.","likes":11200},
+    {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of evidence.","likes":19800},
+    {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":13400},
+    {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of evidence.","likes":9800},
+    {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":21200},
+    {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":12800}
   ],
   "leftPosts":[],
   "rightPosts":[]
@@ -241,7 +241,7 @@ async function fetchBatch(batchNum) {
       model: "grok-3",
       max_tokens: 32000,
       messages: [
-        { role:"system", content:"You are editorial AI for MIDDLE. You have live web access. CRITICAL: Respond with a raw JSON array ONLY. No markdown, no code fences, no commentary. Start immediately with [ and end with ]. Ensure all strings are properly escaped. Never use unescaped newlines, tabs, or quotes inside string values. Every object must have all required fields. Validate your JSON is complete before responding." },
+        { role:"system", content:"You are editorial AI for MIDDLE. You have live web access. CRITICAL: Respond with a raw JSON array ONLY. No markdown, no code fences, no commentary. Start immediately with [ and end with ]. Ensure all strings are properly escaped. Never use unescaped newlines, tabs, or quotes inside string values. Every object must have all required fields. Validate your JSON is complete before responding. FACT CHECK RULES: side=right means the claim is one that conservatives/right-leaning people are making. side=left means the claim is one that liberals/left-leaning people are making. Never assign a claim to the wrong side. Each claim must be something that side is ACTUALLY saying in the current news cycle." },
         { role:"user", content:buildPrompt(batchNum) }
       ]
     });
