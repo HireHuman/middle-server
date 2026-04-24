@@ -227,11 +227,42 @@ async function fetchBatch(batchNum) {
   const ei = text.lastIndexOf("]")+1;
   if (si === -1 || ei === 0) throw new Error("No JSON array in response");
 
-  const raw = text.slice(si, ei)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g,"")
-    .replace(/\t/g," ");
+  let raw = text.slice(si, ei);
 
-  const stories = JSON.parse(raw);
+  // Aggressive sanitization — remove all control chars that break JSON
+  raw = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+
+  // Fix unescaped newlines/tabs inside JSON strings
+  // Walk char by char and clean inside string values
+  let cleaned = "";
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { cleaned += ch; escaped = false; continue; }
+    if (ch === "\\") { cleaned += ch; escaped = true; continue; }
+    if (ch === '"') { inStr = !inStr; cleaned += ch; continue; }
+    if (inStr) {
+      if (ch === "\n") { cleaned += "\\n"; continue; }
+      if (ch === "\r") { cleaned += "\\r"; continue; }
+      if (ch === "\t") { cleaned += "\\t"; continue; }
+    }
+    cleaned += ch;
+  }
+
+  let stories;
+  try {
+    stories = JSON.parse(cleaned);
+  } catch(e1) {
+    // Last resort — strip ALL non-printable chars and try again
+    const stripped = raw.replace(/[^\x20-\x7E\x09\x0A\x0D]/g, "")
+      .replace(/([^\\])(\n|\r)/g, "$1 ");
+    try {
+      stories = JSON.parse(stripped);
+    } catch(e2) {
+      throw new Error("JSON parse failed after sanitization: " + e1.message);
+    }
+  }
   console.log(`Batch ${batchNum}: ${stories.length} stories OK`);
   return stories;
 }
