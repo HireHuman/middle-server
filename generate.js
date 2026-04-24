@@ -1,12 +1,13 @@
 // ─── MIDDLE Story Generator ───────────────────────────────────────────────────
-// Runs daily on Railway. Calls grok-3, saves stories to Firestore.
-// No timeout worries — server can wait as long as Grok needs.
+// Runs daily on Railway. Calls grok-3, fetches Reddit posts + news images,
+// saves everything to Firestore.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GROK_API_KEY = process.env.GROK_API_KEY;
-const FB_PROJECT   = process.env.FB_PROJECT || "themiddle-85852";
-const FB_API_KEY   = process.env.FB_API_KEY  || "AIzaSyBxAzJ0bVpOb2hux5OIylBngUDr0ZoH-w4";
-const FB_BASE      = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
+const GROK_API_KEY   = process.env.GROK_API_KEY;
+const NEWS_API_KEY   = process.env.NEWS_API_KEY; // newsapi.org — free tier
+const FB_PROJECT     = process.env.FB_PROJECT || "themiddle-85852";
+const FB_API_KEY     = process.env.FB_API_KEY  || "AIzaSyBxAzJ0bVpOb2hux5OIylBngUDr0ZoH-w4";
+const FB_BASE        = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
 
 // ─── Firestore REST helpers ───────────────────────────────────────────────────
 async function fsSet(path, obj) {
@@ -38,8 +39,131 @@ function encodeValue(v) {
   if (typeof v === "number")  return { integerValue: String(Math.round(v)) };
   if (typeof v === "boolean") return { booleanValue: v };
   if (Array.isArray(v))       return { arrayValue: { values: v.map(encodeValue) } };
-  if (typeof v === "object")  return { mapValue: { fields: encodeFields(v) } };
+  if (typeof v === "object" && v !== null) return { mapValue: { fields: encodeFields(v) } };
   return { stringValue: String(v) };
+}
+
+// ─── Reddit fetcher ───────────────────────────────────────────────────────────
+async function fetchRedditPosts(searchQuery, topic) {
+  console.log(`  Reddit: fetching posts for "${searchQuery}"`);
+
+  const leftSubreddits  = ["politics", "news", "worldnews", "progressive", "democrats"];
+  const rightSubreddits = ["conservative", "Republican", "NeutralPolitics", "PoliticsRight", "Libertarian"];
+
+  const headers = {
+    "User-Agent": "MIDDLE-App/1.0 (news aggregator; contact@themiddle.app)"
+  };
+
+  async function searchSubreddit(subreddit, query) {
+    try {
+      const url = `https://www.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(query)}&sort=top&t=week&limit=5`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data?.data?.children || []).map(c => c.data).filter(p => p.score > 50);
+    } catch(e) {
+      console.warn(`  Reddit r/${subreddit} failed:`, e.message);
+      return [];
+    }
+  }
+
+  const leftResults  = await Promise.all(leftSubreddits.map(s => searchSubreddit(s, searchQuery)));
+  const rightResults = await Promise.all(rightSubreddits.map(s => searchSubreddit(s, searchQuery)));
+
+  const leftPosts  = leftResults.flat().sort((a,b) => b.score - a.score).slice(0, 5);
+  const rightPosts = rightResults.flat().sort((a,b) => b.score - a.score).slice(0, 5);
+
+  function formatPost(post, side, index) {
+    return {
+      id: `${side[0]}${index+1}`,
+      handle: `r/${post.subreddit}`,
+      source: "Reddit",
+      avatar: post.subreddit[0].toUpperCase(),
+      text: post.title,
+      likes: post.score,
+      reposts: post.num_comments,
+      url: `https://reddit.com${post.permalink}`,
+      searchQuery: searchQuery,
+      thread: post.selftext && post.selftext.length > 10
+        ? [{ avatar: "R", handle: `u/${post.author}`, text: post.selftext.slice(0, 200), likes: Math.floor(post.score * 0.3) }]
+        : []
+    };
+  }
+
+  let formattedLeft  = leftPosts.map((p,i)  => formatPost(p, "left",  i));
+  let formattedRight = rightPosts.map((p,i) => formatPost(p, "right", i));
+
+  // Pad with search links if not enough real posts
+  const leftFallback = {
+    id: `l${formattedLeft.length+1}`, handle: "r/politics", source: "Reddit", avatar: "P",
+    text: `See top Reddit discussions about this story`,
+    likes: 0, reposts: 0,
+    url: `https://www.reddit.com/r/politics/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=week`,
+    searchQuery, thread: []
+  };
+  const rightFallback = {
+    id: `r${formattedRight.length+1}`, handle: "r/conservative", source: "Reddit", avatar: "C",
+    text: `See top Reddit discussions about this story`,
+    likes: 0, reposts: 0,
+    url: `https://www.reddit.com/r/conservative/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=week`,
+    searchQuery, thread: []
+  };
+
+  while (formattedLeft.length < 3)  formattedLeft.push({...leftFallback,  id: `l${formattedLeft.length+1}`});
+  while (formattedRight.length < 3) formattedRight.push({...rightFallback, id: `r${formattedRight.length+1}`});
+
+  console.log(`  Reddit: ${formattedLeft.length} left, ${formattedRight.length} right posts`);
+  return { leftPosts: formattedLeft, rightPosts: formattedRight };
+}
+
+// ─── News image fetcher ───────────────────────────────────────────────────────
+async function fetchNewsImage(searchQuery) {
+  console.log(`  Image: fetching for "${searchQuery}"`);
+
+  // Try NewsAPI first
+  if (NEWS_API_KEY) {
+    try {
+      const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(searchQuery)}&sortBy=relevancy&pageSize=5&language=en&apiKey=${NEWS_API_KEY}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const articles = (data.articles || []).filter(a =>
+          a.urlToImage &&
+          !a.urlToImage.includes("placeholder") &&
+          !a.urlToImage.includes("default")
+        );
+        if (articles.length > 0) {
+          console.log(`  Image: found via NewsAPI`);
+          return {
+            imageUrl: articles[0].urlToImage,
+            imageCredit: articles[0].source?.name || "News",
+            imageArticleUrl: articles[0].url,
+          };
+        }
+      }
+    } catch(e) { console.warn("  NewsAPI failed:", e.message); }
+  }
+
+  // Fallback — Wikipedia
+  try {
+    const terms = searchQuery.split(" ").slice(0, 3).join("_");
+    const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(terms)}`;
+    const res = await fetch(wikiUrl);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.thumbnail?.source) {
+        console.log(`  Image: found via Wikipedia`);
+        return {
+          imageUrl: data.thumbnail.source,
+          imageCredit: "Wikipedia",
+          imageArticleUrl: data.content_urls?.desktop?.page || "",
+        };
+      }
+    }
+  } catch(e) { console.warn("  Wikipedia failed:", e.message); }
+
+  console.log(`  Image: none found`);
+  return { imageUrl: null, imageCredit: null, imageArticleUrl: null };
 }
 
 // ─── Story prompt ─────────────────────────────────────────────────────────────
@@ -49,75 +173,50 @@ function buildPrompt(batch) {
   });
 
   const batchInstructions = batch === 1
-    ? "Focus on the TOP 5 most-discussed political stories right now — the ones with the most coverage across both left and right media."
-    : "Focus on the NEXT 5 most-discussed political stories right now — important stories slightly below the very top but still generating significant discussion. Do NOT repeat any stories from the first batch.";
+    ? "Focus on the TOP 5 most-discussed political stories right now."
+    : "Focus on the NEXT 5 most-discussed political stories. Do NOT repeat stories from batch 1.";
 
-  return `You are the lead editorial writer for "The Middle" — a nonpartisan news app that takes pride in going deeper than any other outlet. Today is ${today}.
+  return `You are the lead editorial writer for "The Middle" — a nonpartisan news app. Today is ${today}.
 
-Search the web broadly for the 5 most-discussed political stories RIGHT NOW. ${batchInstructions}
+Search the web for the 5 most-discussed political stories RIGHT NOW. ${batchInstructions}
 
-EDITORIAL STANDARDS:
+Return ONLY a raw JSON array. No markdown, no code fences. Start with [ end with ].
 
-1. NEUTRALSUMMARY: 3-4 sentences. Factual. Name specific people, numbers, dates.
-
-2. NEUTRALDETAIL: 6-8 sentences of deep background. Name names. Use specific data. Include history, legislation, what happened most recently, what happens next.
-
-3. LEFTSUMMARY / RIGHTSUMMARY: 3-4 sentences each. The STRONGEST version of each side's argument.
-
-4. CONCLUSION: The Middle's editorial voice. 3-4 paragraphs. Where each side is right, where wrong, what both ignore, what a rational solution looks like. Be willing to say things neither side wants to hear.
-
-5. FACTCHECKS: 10 total, 5 per side alternating right/left. Each claim must be something ACTUALLY being said in the current debate. Explanations: 2-3 sentences with specific evidence. Verdicts: TRUE, FALSE, MISLEADING, or UNVERIFIED.
-
-6. SOCIAL POSTS: Real viral-sounding posts. Reddit analytical, X punchy, Bluesky detailed. Include 2-3 reply thread items.
-
-Return ONLY a raw JSON array. No markdown, no code fences, no preamble. Start with [ end with ].
+Include a "searchQuery" field per story — 3-5 specific keywords for searching Reddit (include names, bill names, key terms).
 
 JSON shape for each story:
 {
   "id": "unique-kebab-slug",
-  "topic": "Specific descriptive headline with names and stakes",
+  "topic": "Specific headline with names and stakes",
   "time": "Xh ago",
   "category": "POLITICS",
   "categoryColor": "#818cf8",
   "breaking": false,
-  "neutralSummary": "3-4 sentences.",
+  "searchQuery": "specific search terms e.g. Trump tariffs China trade 2026",
+  "neutralSummary": "3-4 factual sentences.",
   "neutralDetail": "6-8 sentences of deep background.",
   "leftSummary": "3-4 sentences — strongest progressive argument.",
   "rightSummary": "3-4 sentences — strongest conservative argument.",
   "commonGround": ["Shared value 1","Shared value 2","Shared value 3","Shared value 4","Shared value 5"],
-  "conclusion": "3-4 paragraph editorial.",
+  "conclusion": "3-4 paragraph Bird's-Eye View editorial.",
   "factChecks": [
-    {"claim":"Specific right claim","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":18400},
-    {"claim":"Specific left claim","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":14200},
-    {"claim":"Specific right claim","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":22800},
-    {"claim":"Specific left claim","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":16400},
-    {"claim":"Specific right claim","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":11200},
-    {"claim":"Specific left claim","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":19800},
-    {"claim":"Specific right claim","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":13400},
-    {"claim":"Specific left claim","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":9800},
-    {"claim":"Specific right claim","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":21200},
-    {"claim":"Specific left claim","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":12800}
+    {"claim":"Right claim 1","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":18400},
+    {"claim":"Left claim 1","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":14200},
+    {"claim":"Right claim 2","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":22800},
+    {"claim":"Left claim 2","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":16400},
+    {"claim":"Right claim 3","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":11200},
+    {"claim":"Left claim 3","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences.","likes":19800},
+    {"claim":"Right claim 4","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":13400},
+    {"claim":"Left claim 4","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences.","likes":9800},
+    {"claim":"Right claim 5","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences.","likes":21200},
+    {"claim":"Left claim 5","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences.","likes":12800}
   ],
-  "leftPosts": [
-    {"id":"l1","handle":"r/politics","source":"Reddit","avatar":"P","searchQuery":"specific search terms","text":"Viral Reddit post, analytical tone.","likes":34200,"reposts":14800,"url":"https://www.reddit.com/r/politics/search/?q=SEARCHTERMS&sort=top&t=week","thread":[{"avatar":"A","handle":"u/username1","text":"Substantive reply.","likes":8400},{"avatar":"B","handle":"u/username2","text":"Another reply.","likes":3200}]},
-    {"id":"l2","handle":"@handle.bsky.social","source":"Bluesky","avatar":"B","searchQuery":"specific search terms","text":"Bluesky post.","likes":18400,"reposts":7200,"url":"https://bsky.app/search?q=SEARCHTERMS","thread":[{"avatar":"C","handle":"@replyhandle","text":"Reply.","likes":2800}]},
-    {"id":"l3","handle":"@xhandle","source":"X","avatar":"X","searchQuery":"specific search terms","text":"Punchy X post.","likes":42800,"reposts":19600,"url":"https://x.com/search?q=SEARCHTERMS&src=typed_query&f=live","thread":[{"avatar":"D","handle":"@replyhandle","text":"Reply.","likes":9200}]},
-    {"id":"l4","handle":"r/news","source":"Reddit","avatar":"N","searchQuery":"specific search terms","text":"News Reddit post.","likes":28400,"reposts":11200,"url":"https://www.reddit.com/r/news/search/?q=SEARCHTERMS&sort=top&t=week","thread":[{"avatar":"E","handle":"u/newsuser","text":"Reply.","likes":5600}]},
-    {"id":"l5","handle":"@handle.bsky.social","source":"Bluesky","avatar":"A","searchQuery":"specific search terms","text":"Second Bluesky post.","likes":14800,"reposts":5800,"url":"https://bsky.app/search?q=SEARCHTERMS","thread":[{"avatar":"F","handle":"@replyhandle","text":"Reply.","likes":2100}]}
-  ],
-  "rightPosts": [
-    {"id":"r1","handle":"r/conservative","source":"Reddit","avatar":"C","searchQuery":"specific search terms","text":"Conservative Reddit post.","likes":44800,"reposts":19800,"url":"https://www.reddit.com/r/conservative/search/?q=SEARCHTERMS&sort=top&t=week","thread":[{"avatar":"G","handle":"u/username","text":"Reply.","likes":12400},{"avatar":"H","handle":"u/username2","text":"Reply.","likes":6800}]},
-    {"id":"r2","handle":"@xhandle","source":"X","avatar":"R","searchQuery":"specific search terms","text":"Right-leaning X post.","likes":52200,"reposts":24400,"url":"https://x.com/search?q=SEARCHTERMS&src=typed_query&f=live","thread":[{"avatar":"I","handle":"@replyhandle","text":"Reply.","likes":11200}]},
-    {"id":"r3","handle":"r/Republican","source":"Reddit","avatar":"R","searchQuery":"specific search terms","text":"Republican Reddit post.","likes":32800,"reposts":14400,"url":"https://www.reddit.com/r/Republican/search/?q=SEARCHTERMS&sort=top&t=week","thread":[{"avatar":"J","handle":"u/username","text":"Reply.","likes":7200}]},
-    {"id":"r4","handle":"@xhandle","source":"X","avatar":"T","searchQuery":"specific search terms","text":"Second right X post.","likes":38800,"reposts":16800,"url":"https://x.com/search?q=SEARCHTERMS&src=typed_query&f=live","thread":[{"avatar":"K","handle":"@replyhandle","text":"Reply.","likes":8800}]},
-    {"id":"r5","handle":"@handle.bsky.social","source":"Bluesky","avatar":"S","searchQuery":"specific search terms","text":"Right Bluesky post.","likes":16800,"reposts":6800,"url":"https://bsky.app/search?q=SEARCHTERMS","thread":[{"avatar":"L","handle":"@replyhandle","text":"Reply.","likes":3200}]}
-  ]
+  "leftPosts": [],
+  "rightPosts": []
 }
 
 Category colors: POLITICS=#818cf8, WORLD=#ef4444, ECONOMY=#10b981, JUSTICE=#f59e0b, HEALTH=#06b6d4, CULTURE=#ec4899
-Verdict colors: TRUE=#10b981, FALSE=#ef4444, MISLEADING=#f59e0b, UNVERIFIED=#a78bfa
-
-Generate exactly 5 stories. Make every word count.`;
+Generate exactly 5 stories.`;
 }
 
 // ─── Call Grok ────────────────────────────────────────────────────────────────
@@ -135,19 +234,13 @@ async function fetchBatch(batchNum) {
       model: "grok-3",
       max_tokens: 32000,
       messages: [
-        {
-          role: "system",
-          content: "You are the lead editorial AI for MIDDLE. You have live web access. Respond with a raw JSON array only. No markdown, no code fences. Start with [ end with ].",
-        },
+        { role: "system", content: "You are the lead editorial AI for MIDDLE. You have live web access. Respond with a raw JSON array only. No markdown, no code fences. Start with [ end with ]." },
         { role: "user", content: buildPrompt(batchNum) },
       ],
     }),
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Grok API ${res.status}: ${err}`);
-  }
+  if (!res.ok) throw new Error(`Grok API ${res.status}: ${await res.text()}`);
 
   const data = await res.json();
   const text = data.choices?.[0]?.message?.content || "";
@@ -158,8 +251,7 @@ async function fetchBatch(batchNum) {
   const endIdx   = text.lastIndexOf("]") + 1;
   if (startIdx === -1 || endIdx === 0) throw new Error("No JSON array in response");
 
-  // Sanitize
-  let raw = text.slice(startIdx, endIdx)
+  const raw = text.slice(startIdx, endIdx)
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     .replace(/\t/g, " ");
 
@@ -168,23 +260,47 @@ async function fetchBatch(batchNum) {
   return stories;
 }
 
+// ─── Enrich story with Reddit + image ────────────────────────────────────────
+async function enrichStory(story) {
+  console.log(`\nEnriching: "${story.topic}"`);
+  const query = story.searchQuery || story.topic;
+
+  const [redditData, imageData] = await Promise.allSettled([
+    fetchRedditPosts(query, story.topic),
+    fetchNewsImage(query),
+  ]);
+
+  story.leftPosts  = redditData.status === "fulfilled" ? redditData.value.leftPosts  : [];
+  story.rightPosts = redditData.status === "fulfilled" ? redditData.value.rightPosts : [];
+  story.imageUrl        = imageData.status === "fulfilled" ? imageData.value.imageUrl        : null;
+  story.imageCredit     = imageData.status === "fulfilled" ? imageData.value.imageCredit     : null;
+  story.imageArticleUrl = imageData.status === "fulfilled" ? imageData.value.imageArticleUrl : null;
+
+  return story;
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== MIDDLE Story Generator ===");
   console.log(`Started at: ${new Date().toISOString()}`);
+  console.log(`NewsAPI: ${NEWS_API_KEY ? "configured" : "not set — Wikipedia fallback"}`);
 
-  if (!GROK_API_KEY) {
-    throw new Error("GROK_API_KEY environment variable is not set");
-  }
+  if (!GROK_API_KEY) throw new Error("GROK_API_KEY not set");
 
   const today = new Date().toISOString().slice(0, 10);
   console.log(`Generating stories for: ${today}`);
 
-  // Fetch batch 1
-  const batch1 = await fetchBatch(1);
+  // Batch 1
+  const batch1Raw = await fetchBatch(1);
+  console.log("\nEnriching batch 1...");
+  const batch1 = [];
+  for (const story of batch1Raw) {
+    batch1.push(await enrichStory(story));
+    await new Promise(r => setTimeout(r, 2000));
+  }
 
-  // Save batch 1 immediately so app can start showing stories
-  console.log("\nSaving batch 1 to Firestore...");
+  // Save batch 1 immediately so app shows content faster
+  console.log("\nSaving batch 1...");
   await fsSet(`storyCache/${today}`, {
     storiesJson: JSON.stringify(batch1),
     generatedAt: new Date().toISOString(),
@@ -192,12 +308,18 @@ async function main() {
   });
   console.log("Batch 1 saved.");
 
-  // Fetch batch 2
-  const batch2 = await fetchBatch(2);
+  // Batch 2
+  const batch2Raw = await fetchBatch(2);
+  console.log("\nEnriching batch 2...");
+  const batch2 = [];
+  for (const story of batch2Raw) {
+    batch2.push(await enrichStory(story));
+    await new Promise(r => setTimeout(r, 2000));
+  }
 
-  // Save combined
+  // Save all 10
   const allStories = [...batch1, ...batch2];
-  console.log(`\nSaving all ${allStories.length} stories to Firestore...`);
+  console.log(`\nSaving all ${allStories.length} stories...`);
   await fsSet(`storyCache/${today}`, {
     storiesJson: JSON.stringify(allStories),
     generatedAt: new Date().toISOString(),
