@@ -236,7 +236,7 @@ async function fetchBatch(batchNum) {
       model: "grok-3",
       max_tokens: 32000,
       messages: [
-        { role:"system", content:"You are editorial AI for MIDDLE. Live web access. Raw JSON array only. Start [ end ]." },
+        { role:"system", content:"You are editorial AI for MIDDLE. You have live web access. CRITICAL: Respond with a raw JSON array ONLY. No markdown, no code fences, no commentary. Start immediately with [ and end with ]. Ensure all strings are properly escaped. Never use unescaped newlines, tabs, or quotes inside string values. Every object must have all required fields. Validate your JSON is complete before responding." },
         { role:"user", content:buildPrompt(batchNum) }
       ]
     });
@@ -301,16 +301,67 @@ async function fetchBatch(batchNum) {
   }
 
   let stories;
+
+  function repairJSON(str) {
+    // Fix common Grok JSON issues
+    let s = str;
+
+    // Remove trailing commas before } or ]
+    s = s.replace(/,(\s*[}\]])/g, '$1');
+
+    // Fix missing commas between } and { (missing comma between array objects)
+    s = s.replace(/}(\s*){/g, '},$1{');
+
+    // Fix missing commas between ] and [ 
+    s = s.replace(/](\s*)\[/g, '],$1[');
+
+    // Fix unescaped quotes inside strings (basic heuristic)
+    // Replace smart quotes with regular quotes
+    s = s.replace(/[‘’]/g, "'");
+    s = s.replace(/[“”]/g, '\"');
+
+    // Remove any remaining control chars
+    s = s.replace(/[ --]/g, '');
+
+    return s;
+  }
+
+  // Attempt 1: parse cleaned string
   try {
     stories = JSON.parse(cleaned);
   } catch(e1) {
-    // Last resort — strip ALL non-printable chars and try again
-    const stripped = raw.replace(/[^\x20-\x7E\x09\x0A\x0D]/g, "")
-      .replace(/([^\\])(\n|\r)/g, "$1 ");
+    console.log("  Parse attempt 1 failed, trying repair...");
+
+    // Attempt 2: repair then parse
     try {
-      stories = JSON.parse(stripped);
+      stories = JSON.parse(repairJSON(cleaned));
     } catch(e2) {
-      throw new Error("JSON parse failed after sanitization: " + e1.message);
+      console.log("  Parse attempt 2 failed, trying aggressive strip...");
+
+      // Attempt 3: extract just the array, strip everything aggressive
+      try {
+        const aggressive = cleaned
+          .replace(/[^\x20-\x7E]/g, ' ')  // strip all non-ASCII
+          .replace(/,(\s*[}\]])/g, '$1')      // remove trailing commas
+          .replace(/}(\s*){/g, '},$1{');      // add missing commas
+        stories = JSON.parse(aggressive);
+      } catch(e3) {
+        // Attempt 4: try to parse story by story and skip broken ones
+        try {
+          const matches = cleaned.match(/\{[^{}]*"id"[^{}]*\}/gs) || [];
+          if (matches.length > 0) {
+            stories = matches.map(m => {
+              try { return JSON.parse(repairJSON(m)); } catch(e) { return null; }
+            }).filter(Boolean);
+            if (stories.length === 0) throw new Error("No valid stories found");
+            console.log(`  Recovered ${stories.length} stories individually`);
+          } else {
+            throw new Error("No story objects found");
+          }
+        } catch(e4) {
+          throw new Error("JSON parse failed after all attempts: " + e1.message);
+        }
+      }
     }
   }
   console.log(`Batch ${batchNum}: ${stories.length} stories OK`);
