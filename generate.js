@@ -79,15 +79,27 @@ async function searchRedditSub(sub, query) {
 }
 
 function formatRedditPost(p, side, index) {
+  // Validate permalink — Reddit returns relative paths like /r/sub/comments/id/title
+  const permalink = p.permalink || "";
+  const hasRealPermalink = permalink.includes("/comments/");
+  const url = hasRealPermalink
+    ? `https://www.reddit.com${permalink}`
+    : null; // null means no real post found
+
+  if (!hasRealPermalink) {
+    console.log(`    WARNING: No permalink for post "${(p.title||"").slice(0,50)}" — will be skipped`);
+  }
+
   return {
     id: `${side[0]}${index+1}`,
     handle: `r/${p.subreddit}`,
     source: "Reddit",
-    avatar: p.subreddit[0].toUpperCase(),
-    text: p.title,
+    avatar: (p.subreddit||"R")[0].toUpperCase(),
+    text: p.title || "",
     likes: p.score || 0,
     reposts: p.num_comments || 0,
-    url: `https://reddit.com${p.permalink}`,
+    url: url,
+    hasRealUrl: hasRealPermalink,
     searchQuery: p._query || "",
     thread: p.selftext && p.selftext.length > 30
       ? [{ avatar:"R", handle:`u/${p.author}`, text:p.selftext.slice(0,300), likes:Math.floor((p.score||1)*0.2) }]
@@ -107,7 +119,12 @@ async function fetchRedditPosts(searchQuery, topic) {
     const seen = new Set();
     return results
       .flat()
-      .filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; })
+      .filter(p => {
+        if (!p || !p.id || !p.title) return false;
+        if (seen.has(p.id)) return false;
+        seen.add(p.id);
+        return true;
+      })
       .map(p => ({ ...p, _query: searchQuery }))
       .sort((a,b) => (b.score||0) - (a.score||0));
   }
@@ -118,9 +135,15 @@ async function fetchRedditPosts(searchQuery, topic) {
   console.log(`  Reddit left: ${leftAll.length} unique posts`);
   console.log(`  Reddit right: ${rightAll.length} unique posts`);
 
-  // Take top 5 — no relevance filtering, trust that subreddit search works
-  let leftPosts  = leftAll.slice(0, 5).map((p,i) => formatRedditPost(p, "left",  i));
-  let rightPosts = rightAll.slice(0, 5).map((p,i) => formatRedditPost(p, "right", i));
+  // Format posts — only keep ones with real permalinks
+  const leftFormatted  = leftAll.map((p,i)  => formatRedditPost(p, "left",  i)).filter(p => p.hasRealUrl);
+  const rightFormatted = rightAll.map((p,i) => formatRedditPost(p, "right", i)).filter(p => p.hasRealUrl);
+
+  console.log(`  Reddit left with real URLs: ${leftFormatted.length}`);
+  console.log(`  Reddit right with real URLs: ${rightFormatted.length}`);
+
+  let leftPosts  = leftFormatted.slice(0, 5);
+  let rightPosts = rightFormatted.slice(0, 5);
 
   // Pad only if truly nothing found
   const leftFallbackUrl  = `https://www.reddit.com/r/politics/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=year`;
@@ -150,15 +173,33 @@ async function fetchRedditPosts(searchQuery, topic) {
 async function fetchNewsImage(searchQuery) {
   if (NEWS_API_KEY) {
     try {
-      const res = await fetch(
-        `https://newsapi.org/v2/everything?q=${encodeURIComponent(searchQuery)}&sortBy=relevancy&pageSize=5&language=en&apiKey=${NEWS_API_KEY}`
-      );
+      const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(searchQuery)}&sortBy=relevancy&pageSize=10&language=en&apiKey=${NEWS_API_KEY}`;
+      console.log(`  NewsAPI: fetching "${searchQuery}"`);
+      const res = await fetch(url);
+      const status = res.status;
+      console.log(`  NewsAPI status: ${status}`);
       if (res.ok) {
         const data = await res.json();
-        const a = (data.articles||[]).find(a => a.urlToImage && !a.urlToImage.includes("placeholder"));
-        if (a) return { imageUrl: a.urlToImage, imageCredit: a.source?.name||"News", imageArticleUrl: a.url };
+        console.log(`  NewsAPI articles: ${data.articles?.length || 0}`);
+        const a = (data.articles||[]).find(a =>
+          a.urlToImage &&
+          !a.urlToImage.includes("placeholder") &&
+          !a.urlToImage.includes("none") &&
+          a.urlToImage.startsWith("http")
+        );
+        if (a) {
+          console.log(`  NewsAPI image found: ${a.urlToImage.slice(0,60)}`);
+          return { imageUrl: a.urlToImage, imageCredit: a.source?.name||"News", imageArticleUrl: a.url };
+        } else {
+          console.log(`  NewsAPI: no valid image in results`);
+        }
+      } else {
+        const body = await res.text();
+        console.log(`  NewsAPI error body: ${body.slice(0,100)}`);
       }
-    } catch(e) {}
+    } catch(e) { console.log(`  NewsAPI exception: ${e.message}`); }
+  } else {
+    console.log("  NewsAPI: no key configured");
   }
   try {
     const terms = searchQuery.split(" ").slice(0,3).join("_");
