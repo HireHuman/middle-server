@@ -191,6 +191,7 @@ Search the web for 5 major political stories RIGHT NOW. ${batchInstr}
 Return ONLY a raw JSON array. No markdown. Start with [ end with ].
 
 Include "searchQuery": 3-5 specific keywords for Reddit search (names, bill names, key terms).
+"redditKeywords": array of 3-5 individual keywords that are most likely to find Reddit posts e.g. ["Trump", "tariffs", "China", "trade"].
 
 JSON shape:
 [{
@@ -201,6 +202,7 @@ JSON shape:
   "categoryColor":"#818cf8",
   "breaking":false,
   "searchQuery":"specific search terms",
+  "redditKeywords":["keyword1","keyword2","keyword3"],
   "neutralSummary":"3-4 factual sentences.",
   "neutralDetail":"6-8 sentences background.",
   "leftSummary":"3-4 sentences progressive argument.",
@@ -371,24 +373,118 @@ async function fetchBatch(batchNum) {
   return stories;
 }
 
-async function enrichStory(story, imageDelay=0) {
-  console.log(`\nEnriching: "${story.topic}"`);
-  const query = story.searchQuery || story.topic;
+async function enrichStory(story, storyIndex=0) {
+  console.log(`\nEnriching story ${storyIndex+1}: "${story.topic}"`);
 
-  // Fetch Reddit immediately, stagger image requests to avoid rate limits
-  const [reddit] = await Promise.allSettled([
-    fetchRedditPosts(query, story.topic),
+  // Build best Reddit search query from Grok-provided keywords
+  // Use redditKeywords if available, otherwise fall back to searchQuery
+  const redditQuery = story.redditKeywords && story.redditKeywords.length > 0
+    ? story.redditKeywords.slice(0, 4).join(" ")
+    : story.searchQuery || story.topic.split(" ").slice(0, 5).join(" ");
+
+  // Also build a date-aware query — add current year to help find recent posts
+  const year = new Date().getFullYear();
+  const timedQuery = `${redditQuery} ${year}`;
+
+  console.log(`  Search query: "${redditQuery}"`);
+  console.log(`  Timed query:  "${timedQuery}"`);
+
+  // Fetch Reddit posts using both queries and merge results
+  const [reddit1, reddit2] = await Promise.allSettled([
+    fetchRedditPosts(redditQuery, story.topic),
+    fetchRedditPosts(timedQuery,  story.topic),
   ]);
 
-  // Stagger image fetch to avoid NewsAPI rate limit
-  if (imageDelay > 0) await new Promise(r => setTimeout(r, imageDelay));
-  const image = await fetchNewsImage(query).catch(e => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
+  // Merge left and right posts from both queries, dedupe by id
+  function mergePosts(r1, r2, side) {
+    const seen = new Set();
+    const all = [
+      ...(r1.status==="fulfilled" ? r1.value[side] : []),
+      ...(r2.status==="fulfilled" ? r2.value[side] : []),
+    ].filter(p => {
+      if (!p.likes || seen.has(p.url)) return false; // skip fallback links + dupes
+      seen.add(p.url);
+      return true;
+    });
+    return all.sort((a,b) => b.likes - a.likes).slice(0, 5);
+  }
 
-  story.leftPosts       = reddit.status==="fulfilled" ? reddit.value.leftPosts  : [];
-  story.rightPosts      = reddit.status==="fulfilled" ? reddit.value.rightPosts : [];
-  story.imageUrl        = image.imageUrl        || null;
-  story.imageCredit     = image.imageCredit     || null;
-  story.imageArticleUrl = image.imageArticleUrl || null;
+  let leftPosts  = mergePosts(reddit1, reddit2, "leftPosts");
+  let rightPosts = mergePosts(reddit1, reddit2, "rightPosts");
+
+  // If we still don't have 5 real posts, try one more search with just the topic keywords
+  if (leftPosts.length < 3 || rightPosts.length < 3) {
+    const topicWords = story.topic.split(" ")
+      .filter(w => w.length > 4)
+      .slice(0, 4)
+      .join(" ");
+    console.log(`  Fallback topic query: "${topicWords}"`);
+    const reddit3 = await fetchRedditPosts(topicWords, story.topic)
+      .catch(() => ({ leftPosts:[], rightPosts:[] }));
+
+    if (leftPosts.length < 3) {
+      const extra = (reddit3.leftPosts||[]).filter(p => p.likes > 0);
+      leftPosts = [...leftPosts, ...extra].slice(0, 5);
+    }
+    if (rightPosts.length < 3) {
+      const extra = (reddit3.rightPosts||[]).filter(p => p.likes > 0);
+      rightPosts = [...rightPosts, ...extra].slice(0, 5);
+    }
+  }
+
+  // Pad to 5 with search links if still not enough
+  const sq = encodeURIComponent(redditQuery);
+  while (leftPosts.length < 5) {
+    leftPosts.push({
+      id:`l${leftPosts.length+1}`, handle:"r/politics", source:"Reddit", avatar:"P",
+      text:`Browse Reddit: ${story.topic}`, likes:0, reposts:0,
+      url:`https://www.reddit.com/r/politics/search/?q=${sq}&sort=top&t=year`,
+      searchQuery:redditQuery, thread:[]
+    });
+  }
+  while (rightPosts.length < 5) {
+    rightPosts.push({
+      id:`r${rightPosts.length+1}`, handle:"r/conservative", source:"Reddit", avatar:"C",
+      text:`Browse Reddit: ${story.topic}`, likes:0, reposts:0,
+      url:`https://www.reddit.com/r/conservative/search/?q=${sq}&sort=top&t=year`,
+      searchQuery:redditQuery, thread:[]
+    });
+  }
+
+  story.leftPosts  = leftPosts;
+  story.rightPosts = rightPosts;
+
+  const lReal = leftPosts.filter(p=>p.likes>0).length;
+  const rReal = rightPosts.filter(p=>p.likes>0).length;
+  console.log(`  Reddit result: ${lReal}/5 real left, ${rReal}/5 real right`);
+
+  // Stagger image requests — 4 seconds between each story to avoid NewsAPI rate limit
+  const imageDelay = storyIndex * 4000;
+  if (imageDelay > 0) {
+    console.log(`  Waiting ${imageDelay/1000}s before image fetch...`);
+    await new Promise(r => setTimeout(r, imageDelay));
+  }
+
+  // Try multiple image search queries for better results
+  const imageQueries = [
+    story.searchQuery,
+    redditQuery,
+    story.topic.split(" ").slice(0,4).join(" "),
+  ];
+
+  let image = { imageUrl:null, imageCredit:null, imageArticleUrl:null };
+  for (const q of imageQueries) {
+    image = await fetchNewsImage(q).catch(() => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
+    if (image.imageUrl) {
+      console.log(`  Image found with query: "${q}"`);
+      break;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  story.imageUrl        = image.imageUrl;
+  story.imageCredit     = image.imageCredit;
+  story.imageArticleUrl = image.imageArticleUrl;
 
   return story;
 }
@@ -405,8 +501,7 @@ async function main() {
   const raw1 = await fetchBatch(1);
   const batch1 = [];
   for (let i = 0; i < raw1.length; i++) {
-    batch1.push(await enrichStory(raw1[i], i * 1200));
-    await new Promise(r => setTimeout(r, 1500));
+    batch1.push(await enrichStory(raw1[i], i));
   }
 
   await fsSet(`storyCache/${today}`, {
@@ -420,8 +515,7 @@ async function main() {
   const raw2 = await fetchBatch(2);
   const batch2 = [];
   for (let i = 0; i < raw2.length; i++) {
-    batch2.push(await enrichStory(raw2[i], i * 1200));
-    await new Promise(r => setTimeout(r, 1500));
+    batch2.push(await enrichStory(raw2[i], i));
   }
 
   const all = [...batch1, ...batch2];
