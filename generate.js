@@ -39,73 +39,67 @@ function encodeValue(v) {
 }
 
 // ─── Reddit ───────────────────────────────────────────────────────────────────
-// Strictly separated left/right fetching with relevance validation
+const LEFT_SUBS  = ["politics","news","worldnews","progressive","democrats","Liberal","uspolitics","PoliticalDiscussion"];
+const RIGHT_SUBS = ["conservative","Republican","AskConservatives","Libertarian","PoliticsRight","republicans","TGIF_Republican"];
 
-// Left-leaning subreddits only
-const LEFT_SUBS = [
-  "politics", "news", "worldnews", "progressive",
-  "democrats", "Liberal", "AnythingGoesNews", "uspolitics"
-];
+const REDDIT_HEADERS = { "User-Agent": "MIDDLE-NewsApp/1.0" };
 
-// Right-leaning subreddits only — completely separate list
-const RIGHT_SUBS = [
-  "conservative", "Republican", "AskConservatives",
-  "Libertarian", "PoliticsRight", "republicans", "AmericanPolitics"
-];
-
-// Check if a post title is relevant to the story
-function isRelevant(postTitle, searchQuery) {
-  if (!postTitle || !searchQuery) return false;
-  const title = postTitle.toLowerCase();
-  const keywords = searchQuery.toLowerCase()
-    .split(" ")
-    .filter(w => w.length > 3); // ignore short words
-  // Post must contain at least 2 keywords from the search query
-  const matches = keywords.filter(kw => title.includes(kw));
-  return matches.length >= Math.min(2, keywords.length);
+// Relevance check — at least 1 keyword from search query appears in title
+// Much more lenient than before
+function isRelevant(title, searchQuery) {
+  if (!title) return false;
+  const t = title.toLowerCase();
+  // Try each word 4+ chars long
+  const keywords = searchQuery.toLowerCase().split(/\s+/).filter(w => w.length >= 4);
+  if (keywords.length === 0) return true; // no keywords to check, accept all
+  return keywords.some(kw => t.includes(kw));
 }
 
-async function fetchSideRedditPosts(searchQuery, topic, subs, side) {
-  const headers = { "User-Agent": "MIDDLE-App/1.0 (contact@themiddle.app)" };
-  const allPosts = [];
+async function fetchOneSub(sub, query) {
+  try {
+    // Try relevance sort first — best for specific topics
+    const url = `https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(query)}&sort=relevance&t=month&limit=15&restrict_sr=1`;
+    const res = await fetch(url, { headers: REDDIT_HEADERS });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data?.data?.children || [])
+      .map(c => c.data)
+      .filter(p => p && p.title && p.score >= 1); // very low threshold
+  } catch(e) {
+    return [];
+  }
+}
+
+async function fetchSidePosts(searchQuery, topic, subs, side) {
+  // Fetch all subs in parallel
+  const results = await Promise.all(subs.map(s => fetchOneSub(s, searchQuery)));
+  const allPosts = results.flat();
+
+  console.log(`  Reddit ${side}: ${allPosts.length} raw posts from ${subs.length} subs`);
+
+  // Deduplicate
   const seen = new Set();
+  const unique = allPosts.filter(p => {
+    if (seen.has(p.id)) return false;
+    seen.add(p.id);
+    return true;
+  });
 
-  // Search each subreddit specifically
-  await Promise.all(subs.map(async sub => {
-    try {
-      // Try both "top" and "relevance" sort to get more results
-      const [topRes, relRes] = await Promise.all([
-        fetch(`https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(searchQuery)}&sort=top&t=month&limit=10`, { headers }),
-        fetch(`https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(searchQuery)}&sort=relevance&t=month&limit=10`, { headers }),
-      ]);
+  // Apply relevance filter — but fall back to all posts if filter is too strict
+  let relevant = unique.filter(p => isRelevant(p.title, searchQuery));
+  console.log(`  Reddit ${side}: ${relevant.length} relevant after filter`);
 
-      for (const res of [topRes, relRes]) {
-        if (!res.ok) continue;
-        const data = await res.json();
-        const posts = (data?.data?.children || []).map(c => c.data);
-        for (const p of posts) {
-          if (!seen.has(p.id) && p.score > 5) {
-            seen.add(p.id);
-            allPosts.push(p);
-          }
-        }
-      }
-    } catch(e) {
-      console.warn(`  Reddit r/${sub} failed: ${e.message}`);
-    }
-  }));
+  // If filter removed too many, use all unique posts instead
+  if (relevant.length < 3) {
+    console.log(`  Reddit ${side}: too few relevant, using all ${unique.length} unique posts`);
+    relevant = unique;
+  }
 
-  // Filter for relevance — post title must contain story keywords
-  const relevant = allPosts.filter(p => isRelevant(p.title, searchQuery));
-  console.log(`  Reddit ${side}: ${allPosts.length} total, ${relevant.length} relevant`);
+  // Sort by score descending
+  relevant.sort((a,b) => b.score - a.score);
 
-  // Sort by score, take top 5
-  const top = relevant
-    .sort((a,b) => b.score - a.score)
-    .slice(0, 5);
-
-  // Format posts
-  const formatted = top.map((p, i) => ({
+  // Format top 5
+  const formatted = relevant.slice(0, 5).map((p, i) => ({
     id: `${side[0]}${i+1}`,
     handle: `r/${p.subreddit}`,
     source: "Reddit",
@@ -115,40 +109,37 @@ async function fetchSideRedditPosts(searchQuery, topic, subs, side) {
     reposts: p.num_comments,
     url: `https://reddit.com${p.permalink}`,
     searchQuery,
-    thread: p.selftext?.length > 20
-      ? [{ avatar:"R", handle:`u/${p.author}`, text:p.selftext.slice(0,280), likes:Math.floor(p.score*0.25) }]
+    thread: p.selftext?.length > 30
+      ? [{ avatar:"R", handle:`u/${p.author}`, text:p.selftext.slice(0,300), likes:Math.floor(p.score*0.2) }]
       : []
   }));
 
-  // Pad to 5 with subreddit search links if not enough relevant posts
-  const fallbackSub  = side === "left" ? "politics" : "conservative";
-  const fallbackUrl  = `https://www.reddit.com/r/${fallbackSub}/search/?q=${encodeURIComponent(searchQuery)}&sort=top&t=month`;
+  // Only pad if genuinely no posts found at all
+  const fallbackSub = side === "left" ? "politics" : "conservative";
   while (formatted.length < 5) {
+    const i = formatted.length;
     formatted.push({
-      id: `${side[0]}${formatted.length+1}`,
+      id: `${side[0]}${i+1}`,
       handle: `r/${fallbackSub}`,
       source: "Reddit",
       avatar: fallbackSub[0].toUpperCase(),
-      text: `See more ${side} Reddit discussions about: ${topic}`,
+      text: `View Reddit discussion: ${searchQuery}`,
       likes: 0, reposts: 0,
-      url: fallbackUrl,
+      url: `https://www.reddit.com/r/${fallbackSub}/search/?q=${encodeURIComponent(searchQuery)}&sort=relevance&t=month`,
       searchQuery, thread: []
     });
   }
 
+  console.log(`  Reddit ${side} final: ${formatted.filter(p=>p.likes>0).length} real, ${formatted.filter(p=>p.likes===0).length} fallback`);
   return formatted;
 }
 
 async function fetchRedditPosts(searchQuery, topic) {
-  console.log(`  Reddit: "${searchQuery}"`);
-
-  // Fetch left and right completely independently — no shared results
+  console.log(`  Reddit fetching: "${searchQuery}"`);
   const [leftPosts, rightPosts] = await Promise.all([
-    fetchSideRedditPosts(searchQuery, topic, LEFT_SUBS,  "left"),
-    fetchSideRedditPosts(searchQuery, topic, RIGHT_SUBS, "right"),
+    fetchSidePosts(searchQuery, topic, LEFT_SUBS,  "left"),
+    fetchSidePosts(searchQuery, topic, RIGHT_SUBS, "right"),
   ]);
-
-  console.log(`  Reddit final: ${leftPosts.length}L ${rightPosts.length}R`);
   return { leftPosts, rightPosts };
 }
 
@@ -326,20 +317,24 @@ async function fetchBatch(batchNum) {
   return stories;
 }
 
-async function enrichStory(story) {
+async function enrichStory(story, imageDelay=0) {
   console.log(`\nEnriching: "${story.topic}"`);
   const query = story.searchQuery || story.topic;
 
-  const [reddit, image] = await Promise.allSettled([
+  // Fetch Reddit immediately, stagger image requests to avoid rate limits
+  const [reddit] = await Promise.allSettled([
     fetchRedditPosts(query, story.topic),
-    fetchNewsImage(query),
   ]);
+
+  // Stagger image fetch to avoid NewsAPI rate limit
+  if (imageDelay > 0) await new Promise(r => setTimeout(r, imageDelay));
+  const image = await fetchNewsImage(query).catch(e => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
 
   story.leftPosts       = reddit.status==="fulfilled" ? reddit.value.leftPosts  : [];
   story.rightPosts      = reddit.status==="fulfilled" ? reddit.value.rightPosts : [];
-  story.imageUrl        = image.status==="fulfilled"  ? image.value.imageUrl        : null;
-  story.imageCredit     = image.status==="fulfilled"  ? image.value.imageCredit     : null;
-  story.imageArticleUrl = image.status==="fulfilled"  ? image.value.imageArticleUrl : null;
+  story.imageUrl        = image.imageUrl        || null;
+  story.imageCredit     = image.imageCredit     || null;
+  story.imageArticleUrl = image.imageArticleUrl || null;
 
   return story;
 }
@@ -355,9 +350,9 @@ async function main() {
   // Batch 1
   const raw1 = await fetchBatch(1);
   const batch1 = [];
-  for (const s of raw1) {
-    batch1.push(await enrichStory(s));
-    await new Promise(r => setTimeout(r, 2000));
+  for (let i = 0; i < raw1.length; i++) {
+    batch1.push(await enrichStory(raw1[i], i * 1200));
+    await new Promise(r => setTimeout(r, 1500));
   }
 
   await fsSet(`storyCache/${today}`, {
@@ -370,9 +365,9 @@ async function main() {
   // Batch 2
   const raw2 = await fetchBatch(2);
   const batch2 = [];
-  for (const s of raw2) {
-    batch2.push(await enrichStory(s));
-    await new Promise(r => setTimeout(r, 2000));
+  for (let i = 0; i < raw2.length; i++) {
+    batch2.push(await enrichStory(raw2[i], i * 1200));
+    await new Promise(r => setTimeout(r, 1500));
   }
 
   const all = [...batch1, ...batch2];
