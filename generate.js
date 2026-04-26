@@ -262,9 +262,59 @@ JSON shape:
     {"claim":"A specific factual claim that conservatives or right-leaning media ARE ACTUALLY MAKING about this story","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":21200},
     {"claim":"A specific factual claim that liberals or left-leaning media ARE ACTUALLY MAKING about this story","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":12800}
   ],
-  "leftPosts":[],
-  "rightPosts":[]
+  "leftPosts":[
+    {
+      "id":"l1",
+      "handle":"r/politics",
+      "source":"Reddit",
+      "avatar":"P",
+      "text":"The EXACT title of a real Reddit post you found using web search",
+      "likes":42300,
+      "reposts":1840,
+      "url":"https://www.reddit.com/r/politics/comments/REALID/real_post_slug/",
+      "thread":[
+        {"avatar":"A","handle":"u/realusername","text":"A real top comment from that post","likes":8400}
+      ]
+    }
+  ],
+  "rightPosts":[
+    {
+      "id":"r1",
+      "handle":"r/conservative",
+      "source":"Reddit",
+      "avatar":"C",
+      "text":"The EXACT title of a real Reddit post you found using web search",
+      "likes":38200,
+      "reposts":1620,
+      "url":"https://www.reddit.com/r/conservative/comments/REALID/real_post_slug/",
+      "thread":[
+        {"avatar":"B","handle":"u/realusername","text":"A real top comment from that post","likes":6200}
+      ]
+    }
+  ]
 }]
+
+REDDIT INSTRUCTIONS — THIS IS CRITICAL:
+Use your live web search to find REAL Reddit posts about each story. Search Google like this:
+  site:reddit.com/r/politics "story keywords" 
+  site:reddit.com/r/conservative "story keywords"
+  site:reddit.com/r/news "story keywords"
+  site:reddit.com/r/Republican "story keywords"
+
+For EACH story find:
+- 5 real posts from LEFT-leaning subreddits (r/politics, r/news, r/worldnews, r/progressive, r/democrats, r/Liberal)
+- 5 real posts from RIGHT-leaning subreddits (r/conservative, r/Republican, r/AskConservatives, r/Libertarian, r/PoliticsRight)
+
+REQUIREMENTS for each post:
+- The "url" MUST be a real Reddit permalink in format: https://www.reddit.com/r/SUBREDDIT/comments/POSTID/POST_SLUG/
+- The "text" MUST be the exact real title of that post
+- The "likes" MUST be the real upvote count you found
+- The "reposts" MUST be the real comment count
+- Prioritise posts with the highest upvotes and most comments
+- Only include posts directly relevant to this story
+- If you cannot find a real post for a slot, omit it rather than making one up
+
+DO NOT INVENT Reddit posts. Every post must be verifiable at its URL.
 
 Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b HEALTH=#06b6d4 CULTURE=#ec4899
 Generate exactly 5 stories.`;
@@ -417,109 +467,64 @@ async function fetchBatch(batchNum) {
 async function enrichStory(story, storyIndex=0) {
   console.log(`\nEnriching story ${storyIndex+1}: "${story.topic}"`);
 
-  // Build best Reddit search query from Grok-provided keywords
-  // Use redditKeywords if available, otherwise fall back to searchQuery
-  const redditQuery = story.redditKeywords && story.redditKeywords.length > 0
-    ? story.redditKeywords.slice(0, 4).join(" ")
-    : story.searchQuery || story.topic.split(" ").slice(0, 5).join(" ");
-
-  // Also build a date-aware query — add current year to help find recent posts
-  const year = new Date().getFullYear();
-  const timedQuery = `${redditQuery} ${year}`;
-
-  console.log(`  Search query: "${redditQuery}"`);
-  console.log(`  Timed query:  "${timedQuery}"`);
-
-  // Fetch Reddit posts using both queries and merge results
-  const [reddit1, reddit2] = await Promise.allSettled([
-    fetchRedditPosts(redditQuery, story.topic),
-    fetchRedditPosts(timedQuery,  story.topic),
-  ]);
-
-  // Merge left and right posts from both queries, dedupe by id
-  function mergePosts(r1, r2, side) {
-    const seen = new Set();
-    const all = [
-      ...(r1.status==="fulfilled" ? r1.value[side] : []),
-      ...(r2.status==="fulfilled" ? r2.value[side] : []),
-    ].filter(p => {
-      if (!p.likes || seen.has(p.url)) return false; // skip fallback links + dupes
-      seen.add(p.url);
-      return true;
-    });
-    return all.sort((a,b) => b.likes - a.likes).slice(0, 5);
-  }
-
-  let leftPosts  = mergePosts(reddit1, reddit2, "leftPosts");
-  let rightPosts = mergePosts(reddit1, reddit2, "rightPosts");
-
-  // If we still don't have 5 real posts, try one more search with just the topic keywords
-  if (leftPosts.length < 3 || rightPosts.length < 3) {
-    const topicWords = story.topic.split(" ")
-      .filter(w => w.length > 4)
-      .slice(0, 4)
-      .join(" ");
-    console.log(`  Fallback topic query: "${topicWords}"`);
-    const reddit3 = await fetchRedditPosts(topicWords, story.topic)
-      .catch(() => ({ leftPosts:[], rightPosts:[] }));
-
-    if (leftPosts.length < 3) {
-      const extra = (reddit3.leftPosts||[]).filter(p => p.likes > 0);
-      leftPosts = [...leftPosts, ...extra].slice(0, 5);
+  // Reddit posts are now found by Grok directly — just validate them
+  const leftPosts  = (story.leftPosts  || []).filter(p => {
+    if (!p.url || !p.url.includes("/comments/")) {
+      console.log(`  SKIP left post — no real permalink: "${(p.text||"").slice(0,50)}"`);
+      return false;
     }
-    if (rightPosts.length < 3) {
-      const extra = (reddit3.rightPosts||[]).filter(p => p.likes > 0);
-      rightPosts = [...rightPosts, ...extra].slice(0, 5);
-    }
-  }
+    return true;
+  });
 
-  // Pad to 5 with search links if still not enough
-  const sq = encodeURIComponent(redditQuery);
-  while (leftPosts.length < 5) {
+  const rightPosts = (story.rightPosts || []).filter(p => {
+    if (!p.url || !p.url.includes("/comments/")) {
+      console.log(`  SKIP right post — no real permalink: "${(p.text||"").slice(0,50)}"`);
+      return false;
+    }
+    return true;
+  });
+
+  console.log(`  Reddit: ${leftPosts.length} valid left, ${rightPosts.length} valid right`);
+
+  // Pad with search links if Grok didn't find enough real posts
+  const sq = encodeURIComponent(story.searchQuery || story.topic);
+  while (leftPosts.length < 3) {
     leftPosts.push({
       id:`l${leftPosts.length+1}`, handle:"r/politics", source:"Reddit", avatar:"P",
-      text:`Browse Reddit: ${story.topic}`, likes:0, reposts:0,
-      url:`https://www.reddit.com/r/politics/search/?q=${sq}&sort=top&t=year`,
-      searchQuery:redditQuery, thread:[]
+      text:`Browse Reddit discussions: ${story.topic}`, likes:0, reposts:0,
+      url:`https://www.reddit.com/r/politics/search/?q=${sq}&sort=top&t=month`,
+      thread:[]
     });
   }
-  while (rightPosts.length < 5) {
+  while (rightPosts.length < 3) {
     rightPosts.push({
       id:`r${rightPosts.length+1}`, handle:"r/conservative", source:"Reddit", avatar:"C",
-      text:`Browse Reddit: ${story.topic}`, likes:0, reposts:0,
-      url:`https://www.reddit.com/r/conservative/search/?q=${sq}&sort=top&t=year`,
-      searchQuery:redditQuery, thread:[]
+      text:`Browse Reddit discussions: ${story.topic}`, likes:0, reposts:0,
+      url:`https://www.reddit.com/r/conservative/search/?q=${sq}&sort=top&t=month`,
+      thread:[]
     });
   }
 
   story.leftPosts  = leftPosts;
   story.rightPosts = rightPosts;
 
-  const lReal = leftPosts.filter(p=>p.likes>0).length;
-  const rReal = rightPosts.filter(p=>p.likes>0).length;
-  console.log(`  Reddit result: ${lReal}/5 real left, ${rReal}/5 real right`);
-
-  // Stagger image requests — 4 seconds between each story to avoid NewsAPI rate limit
+  // Fetch news image — stagger to avoid rate limits
   const imageDelay = storyIndex * 4000;
   if (imageDelay > 0) {
-    console.log(`  Waiting ${imageDelay/1000}s before image fetch...`);
     await new Promise(r => setTimeout(r, imageDelay));
   }
 
-  // Try multiple image search queries for better results
+  // Try multiple queries for best image result
   const imageQueries = [
     story.searchQuery,
-    redditQuery,
+    story.redditKeywords ? story.redditKeywords.slice(0,3).join(" ") : null,
     story.topic.split(" ").slice(0,4).join(" "),
-  ];
+  ].filter(Boolean);
 
   let image = { imageUrl:null, imageCredit:null, imageArticleUrl:null };
   for (const q of imageQueries) {
     image = await fetchNewsImage(q).catch(() => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
-    if (image.imageUrl) {
-      console.log(`  Image found with query: "${q}"`);
-      break;
-    }
+    if (image.imageUrl) break;
     await new Promise(r => setTimeout(r, 1000));
   }
 
@@ -527,8 +532,15 @@ async function enrichStory(story, storyIndex=0) {
   story.imageCredit     = image.imageCredit;
   story.imageArticleUrl = image.imageArticleUrl;
 
+  if (story.imageUrl) {
+    console.log(`  Image: ${story.imageUrl.slice(0,60)}`);
+  } else {
+    console.log(`  Image: none found`);
+  }
+
   return story;
 }
+
 
 async function main() {
   console.log("=== MIDDLE Story Generator ===");
