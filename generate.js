@@ -79,7 +79,7 @@ async function searchRedditSub(sub, query) {
 }
 
 function formatRedditPost(p, side, index) {
-  // Validate permalink — Reddit returns relative paths like /r/sub/comments/id/title
+  // Validate permalink -- Reddit returns relative paths like /r/sub/comments/id/title
   const permalink = p.permalink || "";
   const hasRealPermalink = permalink.includes("/comments/");
   const url = hasRealPermalink
@@ -87,7 +87,7 @@ function formatRedditPost(p, side, index) {
     : null; // null means no real post found
 
   if (!hasRealPermalink) {
-    console.log(`    WARNING: No permalink for post "${(p.title||"").slice(0,50)}" — will be skipped`);
+    console.log(`    WARNING: No permalink for post "${(p.title||"").slice(0,50)}" -- will be skipped`);
   }
 
   return {
@@ -135,7 +135,7 @@ async function fetchRedditPosts(searchQuery, topic) {
   console.log(`  Reddit left: ${leftAll.length} unique posts`);
   console.log(`  Reddit right: ${rightAll.length} unique posts`);
 
-  // Format posts — only keep ones with real permalinks
+  // Format posts -- only keep ones with real permalinks
   const leftFormatted  = leftAll.map((p,i)  => formatRedditPost(p, "left",  i)).filter(p => p.hasRealUrl);
   const rightFormatted = rightAll.map((p,i) => formatRedditPost(p, "right", i)).filter(p => p.hasRealUrl);
 
@@ -225,7 +225,7 @@ function buildPrompt(batch) {
     ? "Focus on the TOP 5 most-discussed political stories right now."
     : "Focus on the NEXT 5 most-discussed political stories. Do NOT repeat batch 1 stories.";
 
-  return `You are the lead editorial writer for "The Middle" — a nonpartisan news app. Today is ${today}.
+  return `You are the lead editorial writer for "The Middle" -- a nonpartisan news app. Today is ${today}.
 
 Search the web for 5 major political stories RIGHT NOW. ${batchInstr}
 
@@ -294,7 +294,7 @@ JSON shape:
   ]
 }]
 
-REDDIT INSTRUCTIONS — THIS IS CRITICAL:
+REDDIT INSTRUCTIONS -- THIS IS CRITICAL:
 Use your live web search to find REAL Reddit posts about each story. Search Google like this:
   site:reddit.com/r/politics "story keywords" 
   site:reddit.com/r/conservative "story keywords"
@@ -314,17 +314,52 @@ REQUIREMENTS for each post:
 - Only include posts directly relevant to this story
 - If you cannot find a real post for a slot, omit it rather than making one up
 
-DO NOT INVENT Reddit posts. Every post must be verifiable at its URL.
+NEWS COVERAGE -- CRITICAL:
+Use your live web search to find REAL news articles covering each story from across the political spectrum.
+
+Search for each story on these outlets and include any that actually covered it:
+
+LEFT-LEANING: CNN, MSNBC, New York Times, Washington Post, The Guardian, NPR, HuffPost, Vox, The Atlantic, Politico, Slate, Mother Jones, Salon
+
+CENTRE/NEUTRAL: Reuters, Associated Press, BBC, Axios, The Hill, Bloomberg, Newsweek, Time, USA Today, PBS NewsHour
+
+RIGHT-LEANING: Fox News, New York Post, Wall Street Journal, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, The Federalist, Newsmax, Washington Times, Townhall, The Blaze
+
+REQUIREMENTS:
+- Every URL must be a REAL article URL from your web search
+- Only include outlets that actually covered this specific story
+- The headline must be the real article headline you found
+- DO NOT invent articles, URLs or headlines
+- Aim for 3-5 outlets per category where available
+- Omit any outlet that did not cover this story
+
+Add this field to each story:
+"newsCoverage": {
+  "left": [
+    {"outlet":"CNN","url":"https://cnn.com/REAL-URL","headline":"Real headline from article","bias":"left"},
+    {"outlet":"NPR","url":"https://npr.org/REAL-URL","headline":"Real headline","bias":"left"}
+  ],
+  "centre": [
+    {"outlet":"Reuters","url":"https://reuters.com/REAL-URL","headline":"Real headline","bias":"centre"},
+    {"outlet":"BBC","url":"https://bbc.com/REAL-URL","headline":"Real headline","bias":"centre"}
+  ],
+  "right": [
+    {"outlet":"Fox News","url":"https://foxnews.com/REAL-URL","headline":"Real headline","bias":"right"},
+    {"outlet":"Daily Wire","url":"https://dailywire.com/REAL-URL","headline":"Real headline","bias":"right"}
+  ]
+}
+
+Keep leftPosts and rightPosts as empty arrays -- Reddit integration coming soon.
 
 Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b HEALTH=#06b6d4 CULTURE=#ec4899
 Generate exactly 5 stories.`;
 }
 
 async function fetchBatch(batchNum) {
-  console.log(`\nCalling Grok batch ${batchNum}...`);
+  console.log("Calling Grok batch " + batchNum + "...");
   const start = Date.now();
 
-  // Use undici/node fetch with no timeout — let Grok take as long as it needs
+  // Use undici/node fetch with no timeout -- let Grok take as long as it needs
   const { default: https } = await import('https');
 
   const result = await new Promise((resolve, reject) => {
@@ -375,7 +410,7 @@ async function fetchBatch(batchNum) {
 
   let raw = text.slice(si, ei);
 
-  // Aggressive sanitization — remove all control chars that break JSON
+  // Aggressive sanitization -- remove all control chars that break JSON
   raw = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 
   // Fix unescaped newlines/tabs inside JSON strings
@@ -389,7 +424,7 @@ async function fetchBatch(batchNum) {
     if (ch === "\\") { cleaned += ch; escaped = true; continue; }
     if (ch === '"') { inStr = !inStr; cleaned += ch; continue; }
     if (inStr) {
-      if (ch === "\n") { cleaned += "\\n"; continue; }
+      if (ch === "\n") { cleaned += "\n"; continue; }
       if (ch === "\r") { cleaned += "\\r"; continue; }
       if (ch === "\t") { cleaned += "\\t"; continue; }
     }
@@ -467,10 +502,10 @@ async function fetchBatch(batchNum) {
 async function enrichStory(story, storyIndex=0) {
   console.log(`\nEnriching story ${storyIndex+1}: "${story.topic}"`);
 
-  // Reddit posts are now found by Grok directly — just validate them
+  // Reddit posts are now found by Grok directly -- just validate them
   const leftPosts  = (story.leftPosts  || []).filter(p => {
     if (!p.url || !p.url.includes("/comments/")) {
-      console.log(`  SKIP left post — no real permalink: "${(p.text||"").slice(0,50)}"`);
+      console.log(`  SKIP left post -- no real permalink: "${(p.text||"").slice(0,50)}"`);
       return false;
     }
     return true;
@@ -478,7 +513,7 @@ async function enrichStory(story, storyIndex=0) {
 
   const rightPosts = (story.rightPosts || []).filter(p => {
     if (!p.url || !p.url.includes("/comments/")) {
-      console.log(`  SKIP right post — no real permalink: "${(p.text||"").slice(0,50)}"`);
+      console.log(`  SKIP right post -- no real permalink: "${(p.text||"").slice(0,50)}"`);
       return false;
     }
     return true;
@@ -508,7 +543,7 @@ async function enrichStory(story, storyIndex=0) {
   story.leftPosts  = leftPosts;
   story.rightPosts = rightPosts;
 
-  // Fetch news image — stagger to avoid rate limits
+  // Fetch news image -- stagger to avoid rate limits
   const imageDelay = storyIndex * 4000;
   if (imageDelay > 0) {
     await new Promise(r => setTimeout(r, imageDelay));
@@ -585,6 +620,6 @@ async function main() {
 main().catch(err => {
   console.error("❌ Failed:", err.message || err);
   // Exit with code 0 so Railway doesn't immediately restart
-  // A cron job should not retry on failure — wait for next scheduled run
+  // A cron job should not retry on failure -- wait for next scheduled run
   process.exit(0);
 });
