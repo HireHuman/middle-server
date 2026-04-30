@@ -216,7 +216,457 @@ async function fetchNewsImage(searchQuery) {
   return { imageUrl: null, imageCredit: null, imageArticleUrl: null };
 }
 
+// ─── URL Validator ────────────────────────────────────────────────────────────
+async function validateUrl(url) {
+  if (!url || !url.startsWith('http')) return false;
+  try {
+    const { default: https } = await import('https');
+    const { default: http }  = await import('http');
+    const lib = url.startsWith('https') ? https : http;
+    return await new Promise((resolve) => {
+      const req = lib.request(url, { method: 'HEAD', timeout: 5000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MIDDLE-App/1.0)' }
+      }, (res) => {
+        resolve(res.statusCode < 400);
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.end();
+    });
+  } catch(e) { return false; }
+}
+
+async function validateCoverage(newsCoverage) {
+  if (!newsCoverage) return newsCoverage;
+  console.log('  Validating news coverage URLs...');
+
+  async function validateList(list) {
+    if (!Array.isArray(list)) return [];
+    const results = await Promise.all(list.map(async (item) => {
+      if (!item?.url) return null;
+      const valid = await validateUrl(item.url);
+      if (!valid) {
+        console.log("  INVALID: " + item.outlet + " -- " + (item.url||"").slice(0,60));
+        return null;
+      }
+      console.log("  VALID: " + item.outlet);
+      return item;
+    }));
+    return results.filter(Boolean);
+  }
+
+  return {
+    left:   await validateList(newsCoverage.left),
+    centre: await validateList(newsCoverage.centre),
+    right:  await validateList(newsCoverage.right),
+  };
+}
+
 // ─── GROK API CALL (shared by all agents) ────────────────────────────────────
+async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
+  const { default: https } = await import('https');
+
+  const body = JSON.stringify({
+    model: "grok-3",
+    max_tokens: maxTokens,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user",   content: userPrompt   },
+    ]
+  });
+
+  const result = await new Promise((resolve, reject) => {
+    const options = {
+      hostname: "api.x.ai",
+      path: "/v1/chat/completions",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROK_API_KEY}`,
+        "Content-Length": Buffer.byteLength(body),
+      },
+      timeout: 600000,
+    };
+    let data = "";
+    const req = https.request(options, res => {
+      res.on("data", chunk => { data += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Grok timeout")); });
+    req.setTimeout(600000);
+    req.write(body);
+    req.end();
+  });
+
+  if (result.status !== 200) throw new Error(`Grok API ${result.status}: ${result.body.slice(0,200)}`);
+  const parsed = JSON.parse(result.body);
+  return parsed.choices?.[0]?.message?.content || "";
+}
+
+function parseJSON(text) {
+  const arrStart = text.indexOf("[");
+  const objStart = text.indexOf("{");
+  let start = -1, end = -1;
+
+  if (arrStart !== -1 && (objStart === -1 || arrStart < objStart)) {
+    start = arrStart;
+    end = text.lastIndexOf("]") + 1;
+  } else if (objStart !== -1) {
+    start = objStart;
+    end = text.lastIndexOf("}") + 1;
+  }
+  if (start === -1 || end === 0) throw new Error("No JSON found in response");
+
+  let raw = text.slice(start, end);
+
+  // Step 1: Remove null bytes and other truly invalid control chars
+  raw = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+
+  // Step 2: Walk char by char — escape raw newlines/tabs inside strings
+  let cleaned = "";
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { cleaned += ch; escaped = false; continue; }
+    if (ch === "\\") { cleaned += ch; escaped = true; continue; }
+    if (ch === '"') { inStr = !inStr; cleaned += ch; continue; }
+    if (inStr) {
+      if (ch === "\n") { cleaned += "\\n"; continue; }
+      if (ch === "\r") { cleaned += "\\r"; continue; }
+      if (ch === "\t") { cleaned += "\\t"; continue; }
+    }
+    cleaned += ch;
+  }
+
+  // Step 3: Fix common structural issues
+  cleaned = cleaned
+    .replace(/,(\s*[}\]])/g, '$1')   // trailing commas
+    .replace(/}(\s*){/g, '},$1{');    // missing commas between objects
+
+  // Attempt 1: parse cleaned
+  try { return JSON.parse(cleaned); } catch(e1) {
+    // Attempt 2: strip all non-ASCII and retry
+    try {
+      const stripped = cleaned
+        .replace(/[^\x20-\x7E\x09\x0A\x0D]/g, " ")
+        .replace(/,(\s*[}\]])/g, '$1');
+      return JSON.parse(stripped);
+    } catch(e2) {
+      // Attempt 3: extract individual objects
+      const matches = cleaned.match(/\{[^{}]{20,}\}/gs) || [];
+      if (matches.length > 0) {
+        const items = matches.map(m => { try { return JSON.parse(m); } catch(e) { return null; } }).filter(Boolean);
+        if (items.length > 0) {
+          console.log("  JSON recovered " + items.length + " items individually");
+          return items;
+        }
+      }
+      throw new Error("JSON parse failed: " + e1.message);
+    }
+  }
+}
+
+// ─── AGENT 1: STORY WRITER ────────────────────────────────────────────────────
+// Writes 5 full stories per batch — left/right perspectives, fact checks,
+// common ground, blindspot, Bird's-Eye View
+async function agentWriter(batch) {
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday:"long", month:"long", day:"numeric", year:"numeric"
+  });
+  const batchInstr = batch === 1
+    ? "Focus on the TOP 5 most-discussed political stories right now — the most covered across both left and right media."
+    : "Focus on the NEXT 5 most-discussed political stories. Important but slightly below the top 5. Do NOT repeat batch 1 stories.";
+
+  console.log(`\nAgent 1 (Writer) — batch ${batch}...`);
+  const start = Date.now();
+
+  const system = `You are the lead editorial writer for MIDDLE, a nonpartisan news app. You have live web access.
+Your job: write 5 complete, deeply researched political stories.
+CRITICAL JSON RULES: Return ONLY a raw JSON array. No markdown. No code fences. Start with [ end with ].
+All strings must be properly escaped. No raw newlines inside strings. No trailing commas.`;
+
+  const user = `Today is ${today}. ${batchInstr}
+
+Return a JSON array of exactly 5 stories. Each story:
+{
+  "id": "unique-kebab-slug",
+  "topic": "Specific headline with real names and stakes",
+  "time": "Xh ago",
+  "category": "POLITICS",
+  "categoryColor": "#818cf8",
+  "breaking": false,
+  "searchQuery": "3-5 keywords for searching this story e.g. Trump tariffs China 2026",
+  "neutralSummary": "3-4 factual sentences. Real names, numbers, dates.",
+  "neutralDetail": "6-8 sentences of deep background and context.",
+  "leftSummary": "3-4 sentences — the strongest honest progressive argument.",
+  "rightSummary": "3-4 sentences — the strongest honest conservative argument.",
+  "commonGround": ["Genuine shared value 1","Genuine shared value 2","Genuine shared value 3","Genuine shared value 4","Genuine shared value 5"],
+  "conclusion": "3-4 paragraph Bird's-Eye View editorial. Where each side is right, where wrong, what both ignore.",
+  "blindspotLeft": "1-2 sentences on what left-leaning media is NOT covering about this story.",
+  "blindspotRight": "1-2 sentences on what right-leaning media is NOT covering about this story.",
+  "factChecks": [
+    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":18400},
+    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":14200},
+    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":22800},
+    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":16400},
+    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":11200},
+    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":19800},
+    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":13400},
+    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":9800},
+    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":21200},
+    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":12800}
+  ],
+  "leftPosts": [],
+  "rightPosts": [],
+  "newsCoverage": {"left":[],"centre":[],"right":[]}
+}
+
+Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b HEALTH=#06b6d4 CULTURE=#ec4899`;
+
+  const text = await callGrok(system, user, 32000);
+  const elapsed = ((Date.now()-start)/1000).toFixed(1);
+  console.log(`Agent 1 done in ${elapsed}s`);
+  const stories = parseJSON(text);
+  console.log(`Agent 1: ${stories.length} stories written`);
+  return stories;
+}
+
+// ─── AGENT 2: SOURCE FINDER ───────────────────────────────────────────────────
+// For each story, finds real news article URLs from left/centre/right outlets
+async function agentSourceFinder(story) {
+  console.log(`  Agent 2 (Sources) — "${story.topic.slice(0,50)}"`);
+  const start = Date.now();
+
+  const system = `You are a research assistant for MIDDLE news app. You have live web access.
+Your ONLY job: find real, working news article URLs about a specific story.
+Return ONLY a raw JSON object. No markdown. No commentary.
+CRITICAL: Every URL must be a real article you found via web search. Never invent URLs.`;
+
+  const user = `Search the web right now for news articles about this story:
+"${story.topic}"
+
+Search query: "${story.searchQuery}"
+
+Find real articles from these outlets if they covered this story:
+
+LEFT: CNN, MSNBC, New York Times, Washington Post, The Guardian, NPR, HuffPost, Vox, The Atlantic, Politico
+CENTRE: Reuters, Associated Press, BBC, Axios, The Hill, Bloomberg, Newsweek, USA Today
+RIGHT: Fox News, New York Post, Wall Street Journal, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
+
+Return this JSON:
+{
+  "left": [
+    {"outlet":"CNN","url":"https://cnn.com/REAL-ARTICLE-PATH","headline":"Exact headline from the article","bias":"left"}
+  ],
+  "centre": [
+    {"outlet":"Reuters","url":"https://reuters.com/REAL-ARTICLE-PATH","headline":"Exact headline","bias":"centre"}
+  ],
+  "right": [
+    {"outlet":"Fox News","url":"https://foxnews.com/REAL-ARTICLE-PATH","headline":"Exact headline","bias":"right"}
+  ]
+}
+
+Rules:
+- Only include outlets that ACTUALLY published an article about this specific story
+- Every URL must be real and working — you found it via web search
+- Include the exact article headline
+- Aim for 3-5 outlets per category where available
+- If an outlet did not cover this story, omit it entirely
+- Do NOT invent or guess URLs`;
+
+  try {
+    const text = await callGrok(system, user, 8000);
+    const elapsed = ((Date.now()-start)/1000).toFixed(1);
+    const coverage = parseJSON(text);
+    const total = (coverage.left?.length||0)+(coverage.centre?.length||0)+(coverage.right?.length||0);
+    console.log(`    Agent 2 done in ${elapsed}s — ${total} sources found`);
+    return coverage;
+  } catch(e) {
+    console.warn(`    Agent 2 failed: ${e.message}`);
+    return { left:[], centre:[], right:[] };
+  }
+}
+
+// ─── AGENT 3: VERIFIER ────────────────────────────────────────────────────────
+// Reviews the complete story for accuracy, balance, and correct fact check sides
+async function agentVerifier(story) {
+  console.log(`  Agent 3 (Verifier) — "${story.topic.slice(0,50)}"`);
+  const start = Date.now();
+
+  const system = `You are a senior editorial fact-checker for MIDDLE, a nonpartisan news app. You have live web access.
+Your job: review a completed story and fix any errors.
+Return ONLY a raw JSON object with corrections. No markdown.`;
+
+  const user = `Review this story for MIDDLE and fix any problems:
+
+Topic: "${story.topic}"
+
+Left summary: "${story.leftSummary}"
+Right summary: "${story.rightSummary}"
+
+Fact checks to verify:
+${story.factChecks.map((fc,i) => `${i+1}. [${fc.side}] "${fc.claim}" — verdict: ${fc.verdict}`).join('\n')}
+
+Check for these specific issues:
+1. FACT CHECK SIDES: Is each claim actually being made by the side it's assigned to? 
+   A "right" claim must be something conservatives are actually saying. 
+   A "left" claim must be something liberals are actually saying.
+2. VERDICTS: Are the TRUE/FALSE/MISLEADING/UNVERIFIED verdicts accurate?
+3. BALANCE: Is the left summary genuinely the strongest progressive argument? Is the right summary genuinely the strongest conservative argument?
+
+Return a JSON object:
+{
+  "approved": true,
+  "corrections": {
+    "factChecks": [
+      {
+        "index": 0,
+        "field": "side",
+        "oldValue": "right",
+        "newValue": "left",
+        "reason": "This claim is actually being made by the left"
+      }
+    ],
+    "leftSummary": null,
+    "rightSummary": null
+  },
+  "notes": "Brief overall assessment"
+}
+
+If everything looks correct set "approved": true and empty corrections arrays.
+Only fix genuine errors — do not change things that are accurate.`;
+
+  try {
+    const text = await callGrok(system, user, 4000);
+    const elapsed = ((Date.now()-start)/1000).toFixed(1);
+    const review = parseJSON(text);
+    console.log(`    Agent 3 done in ${elapsed}s — approved: ${review.approved}`);
+
+    // Apply corrections if any
+    if (review.corrections?.factChecks?.length > 0) {
+      for (const fix of review.corrections.factChecks) {
+        if (fix.index >= 0 && fix.index < story.factChecks.length) {
+          console.log(`    Fixing factCheck[${fix.index}] ${fix.field}: ${fix.oldValue} → ${fix.newValue}`);
+          story.factChecks[fix.index][fix.field] = fix.newValue;
+          // Update color if side changed
+          if (fix.field === "side") {
+            const fc = story.factChecks[fix.index];
+            if (fix.newValue === "left")  fc.color = fc.color; // keep existing verdict color
+            if (fix.newValue === "right") fc.color = fc.color;
+          }
+        }
+      }
+    }
+    if (review.corrections?.leftSummary)  story.leftSummary  = review.corrections.leftSummary;
+    if (review.corrections?.rightSummary) story.rightSummary = review.corrections.rightSummary;
+    story.verifierNotes = review.notes || "";
+    return story;
+  } catch(e) {
+    console.warn(`    Agent 3 failed: ${e.message} — using original`);
+    return story;
+  }
+}
+
+// ─── FULL PIPELINE: Writer → Sources → Verify → Image ────────────────────────
+async function processBatch(batchNum) {
+  // Step 1: Write all 5 stories
+  const stories = await agentWriter(batchNum);
+
+  // Step 2: For each story, find sources + verify + get image
+  // Run source finding and verification in sequence per story
+  // (parallel would be too many simultaneous Grok calls)
+  const processed = [];
+  for (let i = 0; i < stories.length; i++) {
+    let story = stories[i];
+    console.log(`\nProcessing story ${i+1}/${stories.length}: "${story.topic.slice(0,50)}"`);
+
+    // Agent 2: Find real news sources
+    story.newsCoverage = await agentSourceFinder(story);
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Agent 3: Verify and fix errors
+    story = await agentVerifier(story);
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Validate source URLs
+    if (story.newsCoverage) {
+      story.newsCoverage = await validateCoverage(story.newsCoverage);
+    }
+
+    // Get news image
+    const imageDelay = i * 3000;
+    if (imageDelay > 0) await new Promise(r => setTimeout(r, imageDelay));
+    const imageQueries = [story.searchQuery, story.topic.split(" ").slice(0,4).join(" ")].filter(Boolean);
+    let image = { imageUrl:null, imageCredit:null, imageArticleUrl:null };
+    for (const q of imageQueries) {
+      image = await fetchNewsImage(q).catch(() => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
+      if (image.imageUrl) { console.log(`  Image found`); break; }
+      await new Promise(r => setTimeout(r, 800));
+    }
+    story.imageUrl        = image.imageUrl;
+    story.imageCredit     = image.imageCredit;
+    story.imageArticleUrl = image.imageArticleUrl;
+
+    const coverage = story.newsCoverage;
+    const srcCount = (coverage?.left?.length||0)+(coverage?.centre?.length||0)+(coverage?.right?.length||0);
+    console.log(`  Story complete — ${srcCount} verified sources, image: ${story.imageUrl ? 'yes':'no'}`);
+    processed.push(story);
+  }
+  return processed;
+}
+
+
+async function main() {
+  console.log("=== MIDDLE Story Generator -- 3-Agent Pipeline ===");
+  console.log("Started at: " + new Date().toISOString());
+  if (!GROK_API_KEY) throw new Error("GROK_API_KEY not set");
+
+  const today = new Date().toISOString().slice(0,10);
+  console.log("Date: " + today);
+  console.log("Pipeline: Writer > Source Finder > Verifier > Image");
+
+  // Batch 1 through full pipeline
+  console.log("\n=== BATCH 1 ===");
+  const batch1 = await processBatch(1);
+
+  await fsSet("storyCache/" + today, {
+    storiesJson: JSON.stringify(batch1),
+    generatedAt: new Date().toISOString(),
+    complete: false,
+  });
+  console.log("Batch 1 saved -- " + batch1.length + " stories");
+
+  // Batch 2
+  console.log("\n=== BATCH 2 ===");
+  const batch2 = await processBatch(2);
+
+  const all = [...batch1, ...batch2];
+  await fsSet("storyCache/" + today, {
+    storiesJson: JSON.stringify(all),
+    generatedAt: new Date().toISOString(),
+    complete: true,
+  });
+
+  const totalSources = all.reduce((sum, s) => {
+    const c = s.newsCoverage||{};
+    return sum + (c.left?.length||0) + (c.centre?.length||0) + (c.right?.length||0);
+  }, 0);
+  const withImages = all.filter(s => s.imageUrl).length;
+
+  console.log("\n Done!");
+  console.log("  " + all.length + " stories saved for " + today);
+  console.log("  " + totalSources + " verified news sources");
+  console.log("  " + withImages + "/10 stories with images");
+  console.log("Finished: " + new Date().toISOString());
+}
+main().catch(err => {
+  console.error("❌ Failed:", err.message || err);
+  // Exit with code 0 so Railway doesn't immediately restart
+  // A cron job should not retry on failure -- wait for next scheduled run
+  process.exit(0);
+});// ─── GROK API CALL (shared by all agents) ────────────────────────────────────
 async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
   const { default: https } = await import('https');
 
