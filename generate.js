@@ -499,6 +499,53 @@ async function fetchBatch(batchNum) {
   return stories;
 }
 
+// ─── URL Validator ────────────────────────────────────────────────────────────
+async function validateUrl(url) {
+  if (!url || !url.startsWith('http')) return false;
+  try {
+    const { default: https } = await import('https');
+    const { default: http }  = await import('http');
+    const lib = url.startsWith('https') ? https : http;
+    return await new Promise((resolve) => {
+      const req = lib.request(url, { method: 'HEAD', timeout: 5000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MIDDLE-App/1.0)' }
+      }, (res) => {
+        // 200, 301, 302 are all valid
+        resolve(res.statusCode < 400);
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.end();
+    });
+  } catch(e) { return false; }
+}
+
+async function validateCoverage(newsCoverage) {
+  if (!newsCoverage) return newsCoverage;
+  console.log('  Validating news coverage URLs...');
+
+  async function validateList(list) {
+    if (!Array.isArray(list)) return [];
+    const results = await Promise.all(list.map(async (item) => {
+      if (!item?.url) return null;
+      const valid = await validateUrl(item.url);
+      if (!valid) {
+        console.log(`  INVALID URL dropped: ${item.outlet} — ${item.url.slice(0,60)}`);
+        return null;
+      }
+      console.log(`  VALID: ${item.outlet}`);
+      return item;
+    }));
+    return results.filter(Boolean);
+  }
+
+  return {
+    left:   await validateList(newsCoverage.left),
+    centre: await validateList(newsCoverage.centre),
+    right:  await validateList(newsCoverage.right),
+  };
+}
+
 async function enrichStory(story, storyIndex=0) {
   console.log(`\nEnriching story ${storyIndex+1}: "${story.topic}"`);
 
@@ -571,6 +618,15 @@ async function enrichStory(story, storyIndex=0) {
     console.log(`  Image: ${story.imageUrl.slice(0,60)}`);
   } else {
     console.log(`  Image: none found`);
+  }
+
+  // Validate news coverage URLs — drop any that don't resolve
+  if (story.newsCoverage) {
+    story.newsCoverage = await validateCoverage(story.newsCoverage);
+    const total = (story.newsCoverage.left?.length||0) +
+                  (story.newsCoverage.centre?.length||0) +
+                  (story.newsCoverage.right?.length||0);
+    console.log(`  Coverage: ${total} valid URLs after validation`);
   }
 
   return story;
