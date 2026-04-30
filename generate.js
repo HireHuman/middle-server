@@ -259,15 +259,12 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
 }
 
 function parseJSON(text) {
-  // Find JSON array or object
   const arrStart = text.indexOf("[");
   const objStart = text.indexOf("{");
-  let start = -1;
-  let end = -1;
-  let isArray = false;
+  let start = -1, end = -1;
 
   if (arrStart !== -1 && (objStart === -1 || arrStart < objStart)) {
-    start = arrStart; isArray = true;
+    start = arrStart;
     end = text.lastIndexOf("]") + 1;
   } else if (objStart !== -1) {
     start = objStart;
@@ -275,16 +272,53 @@ function parseJSON(text) {
   }
   if (start === -1 || end === 0) throw new Error("No JSON found in response");
 
-  let raw = text.slice(start, end)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/,(\s*[}\]])/g, '$1')
-    .replace(/}(\s*){/g, '},$1{');
+  let raw = text.slice(start, end);
 
-  try { return JSON.parse(raw); } catch(e) {
-    // Aggressive fallback
-    const stripped = raw.replace(/[^\x20-\x7E\x09\x0A\x0D]/g, " ")
-      .replace(/,(\s*[}\]])/g, '$1');
-    return JSON.parse(stripped);
+  // Step 1: Remove null bytes and other truly invalid control chars
+  raw = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+
+  // Step 2: Walk char by char — escape raw newlines/tabs inside strings
+  let cleaned = "";
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { cleaned += ch; escaped = false; continue; }
+    if (ch === "\\") { cleaned += ch; escaped = true; continue; }
+    if (ch === '"') { inStr = !inStr; cleaned += ch; continue; }
+    if (inStr) {
+      if (ch === "\n") { cleaned += "\\n"; continue; }
+      if (ch === "\r") { cleaned += "\\r"; continue; }
+      if (ch === "\t") { cleaned += "\\t"; continue; }
+    }
+    cleaned += ch;
+  }
+
+  // Step 3: Fix common structural issues
+  cleaned = cleaned
+    .replace(/,(\s*[}\]])/g, '$1')   // trailing commas
+    .replace(/}(\s*){/g, '},$1{');    // missing commas between objects
+
+  // Attempt 1: parse cleaned
+  try { return JSON.parse(cleaned); } catch(e1) {
+    // Attempt 2: strip all non-ASCII and retry
+    try {
+      const stripped = cleaned
+        .replace(/[^\x20-\x7E\x09\x0A\x0D]/g, " ")
+        .replace(/,(\s*[}\]])/g, '$1');
+      return JSON.parse(stripped);
+    } catch(e2) {
+      // Attempt 3: extract individual objects
+      const matches = cleaned.match(/\{[^{}]{20,}\}/gs) || [];
+      if (matches.length > 0) {
+        const items = matches.map(m => { try { return JSON.parse(m); } catch(e) { return null; } }).filter(Boolean);
+        if (items.length > 0) {
+          console.log("  JSON recovered " + items.length + " items individually");
+          return items;
+        }
+      }
+      throw new Error("JSON parse failed: " + e1.message);
+    }
   }
 }
 
