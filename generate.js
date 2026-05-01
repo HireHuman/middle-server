@@ -368,28 +368,124 @@ function parseJSON(text) {
   }
 }
 
-// ─── AGENT 1: STORY WRITER ────────────────────────────────────────────────────
-// Writes 5 full stories per batch — left/right perspectives, fact checks,
-// common ground, blindspot, Bird's-Eye View
-async function agentWriter(batch) {
+// ─── AGENT 1: STORY SCOUT + WRITER ──────────────────────────────────────────
+// Step 1a: NewsAPI fetches real headlines from trusted left + right sources
+// Step 1b: Grok picks the most newsworthy stories and writes full editorial
+
+const LEFT_DOMAINS  = "nytimes.com,washingtonpost.com,npr.org,theguardian.com";
+const RIGHT_DOMAINS = "foxnews.com,wsj.com,nypost.com,washingtonexaminer.com";
+const CENTRE_DOMAINS = "reuters.com,apnews.com,thehill.com";
+const ALL_DOMAINS   = LEFT_DOMAINS + "," + RIGHT_DOMAINS + "," + CENTRE_DOMAINS;
+
+async function fetchNewsAPIHeadlines() {
+  if (!NEWS_API_KEY) {
+    console.log("  NewsAPI key not set — skipping headline fetch");
+    return [];
+  }
+
+  // Get stories from last 24 hours
+  const from = new Date(Date.now() - 24*60*60*1000).toISOString();
+  const headlines = [];
+
+  // Fetch left sources
+  try {
+    const leftUrl = `https://newsapi.org/v2/everything?domains=${LEFT_DOMAINS}&from=${from}&sortBy=popularity&pageSize=20&language=en&q=politics OR government OR congress OR senate OR president OR election&apiKey=${NEWS_API_KEY}`;
+    const res = await fetch(leftUrl);
+    if (res.ok) {
+      const data = await res.json();
+      const articles = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
+      console.log(`  NewsAPI left sources: ${articles.length} headlines`);
+      headlines.push(...articles.map(a => ({
+        title: a.title,
+        url: a.url,
+        source: a.source?.name || "Unknown",
+        publishedAt: a.publishedAt,
+        lean: "left"
+      })));
+    }
+  } catch(e) { console.warn("  NewsAPI left fetch failed:", e.message); }
+
+  await new Promise(r => setTimeout(r, 1000));
+
+  // Fetch right sources
+  try {
+    const rightUrl = `https://newsapi.org/v2/everything?domains=${RIGHT_DOMAINS}&from=${from}&sortBy=popularity&pageSize=20&language=en&q=politics OR government OR congress OR senate OR president OR election&apiKey=${NEWS_API_KEY}`;
+    const res = await fetch(rightUrl);
+    if (res.ok) {
+      const data = await res.json();
+      const articles = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
+      console.log(`  NewsAPI right sources: ${articles.length} headlines`);
+      headlines.push(...articles.map(a => ({
+        title: a.title,
+        url: a.url,
+        source: a.source?.name || "Unknown",
+        publishedAt: a.publishedAt,
+        lean: "right"
+      })));
+    }
+  } catch(e) { console.warn("  NewsAPI right fetch failed:", e.message); }
+
+  await new Promise(r => setTimeout(r, 1000));
+
+  // Fetch centre sources
+  try {
+    const centreUrl = `https://newsapi.org/v2/everything?domains=${CENTRE_DOMAINS}&from=${from}&sortBy=popularity&pageSize=15&language=en&q=politics OR government OR congress OR senate OR president&apiKey=${NEWS_API_KEY}`;
+    const res = await fetch(centreUrl);
+    if (res.ok) {
+      const data = await res.json();
+      const articles = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
+      console.log(`  NewsAPI centre sources: ${articles.length} headlines`);
+      headlines.push(...articles.map(a => ({
+        title: a.title,
+        url: a.url,
+        source: a.source?.name || "Unknown",
+        publishedAt: a.publishedAt,
+        lean: "centre"
+      })));
+    }
+  } catch(e) { console.warn("  NewsAPI centre fetch failed:", e.message); }
+
+  console.log(`  Total headlines fetched: ${headlines.length}`);
+  return headlines;
+}
+
+async function agentWriter(batch, allHeadlines) {
   const today = new Date().toLocaleDateString("en-US", {
     weekday:"long", month:"long", day:"numeric", year:"numeric"
   });
   const batchInstr = batch === 1
-    ? "Focus on the TOP 5 most-discussed political stories right now — the most covered across both left and right media."
-    : "Focus on the NEXT 5 most-discussed political stories. Important but slightly below the top 5. Do NOT repeat batch 1 stories.";
+    ? "Select the TOP 5 most politically significant stories from the headlines provided — stories covered by BOTH left and right sources are highest priority."
+    : "Select the NEXT 5 most politically significant stories — do NOT repeat any stories from batch 1.";
 
   console.log(`\nAgent 1 (Writer) — batch ${batch}...`);
   const start = Date.now();
 
+  // Format headlines for Grok — include source URLs so it knows what's real
+  const headlineList = allHeadlines
+    .slice(0, 50) // max 50 headlines to stay within token budget
+    .map((h, i) => `${i+1}. [${h.lean.toUpperCase()}] ${h.source}: "${h.title}" — ${h.url}`)
+    .join('\n');
+
   const system = `You are the lead editorial writer for MIDDLE, a nonpartisan news app. You have live web access.
-Your job: write 5 complete, deeply researched political stories.
+Your job: select the most important political stories from today's headlines and write full editorial content.
 CRITICAL JSON RULES: Return ONLY a raw JSON array. No markdown. No code fences. Start with [ end with ].
 All strings must be properly escaped. No raw newlines inside strings. No trailing commas.`;
 
   const user = `Today is ${today}. ${batchInstr}
 
-Return a JSON array of exactly 5 stories. Each story:
+Here are today's real headlines from trusted left, right, and centre sources (last 24 hours):
+
+${headlineList || "No headlines available — use your live web search to find today's top 5 political stories."}
+
+From these headlines, select 5 stories and write full editorial content. Prioritise stories that:
+1. Are covered by BOTH left and right sources (most newsworthy)
+2. Have genuine political significance
+3. Are from the last 24 hours
+4. Represent diverse topics (not all the same theme)
+
+For each selected story, the "sourceUrl" field should use the real URL from the headlines above.
+
+Return a JSON array of exactly 5 stories:
 {
   "id": "unique-kebab-slug",
   "topic": "Specific headline with real names and stakes",
@@ -397,26 +493,27 @@ Return a JSON array of exactly 5 stories. Each story:
   "category": "POLITICS",
   "categoryColor": "#818cf8",
   "breaking": false,
-  "searchQuery": "3-5 keywords for searching this story e.g. Trump tariffs China 2026",
+  "searchQuery": "3-5 keywords for searching e.g. Trump tariffs China 2026",
+  "sourceUrl": "https://real-url-from-headlines-above.com/article",
   "neutralSummary": "3-4 factual sentences. Real names, numbers, dates.",
   "neutralDetail": "6-8 sentences of deep background and context.",
   "leftSummary": "3-4 sentences — the strongest honest progressive argument.",
   "rightSummary": "3-4 sentences — the strongest honest conservative argument.",
   "commonGround": ["Genuine shared value 1","Genuine shared value 2","Genuine shared value 3","Genuine shared value 4","Genuine shared value 5"],
   "conclusion": "3-4 paragraph Bird's-Eye View editorial. Where each side is right, where wrong, what both ignore.",
-  "blindspotLeft": "1-2 sentences on what left-leaning media is NOT covering about this story.",
-  "blindspotRight": "1-2 sentences on what right-leaning media is NOT covering about this story.",
+  "blindspotLeft": "1-2 sentences: what left-leaning media is NOT covering about this story.",
+  "blindspotRight": "1-2 sentences: what right-leaning media is NOT covering about this story.",
   "factChecks": [
-    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":18400},
-    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":14200},
-    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":22800},
-    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":16400},
-    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":11200},
-    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":19800},
-    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":13400},
-    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":9800},
-    {"claim":"A specific claim conservatives are ACTUALLY making right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":21200},
-    {"claim":"A specific claim liberals are ACTUALLY making right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":12800}
+    {"claim":"A specific claim conservatives ARE ACTUALLY MAKING right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":18400},
+    {"claim":"A specific claim liberals ARE ACTUALLY MAKING right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":14200},
+    {"claim":"A specific claim conservatives ARE ACTUALLY MAKING right now","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":22800},
+    {"claim":"A specific claim liberals ARE ACTUALLY MAKING right now","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":16400},
+    {"claim":"A specific claim conservatives ARE ACTUALLY MAKING right now","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":11200},
+    {"claim":"A specific claim liberals ARE ACTUALLY MAKING right now","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences evidence.","likes":19800},
+    {"claim":"A specific claim conservatives ARE ACTUALLY MAKING right now","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":13400},
+    {"claim":"A specific claim liberals ARE ACTUALLY MAKING right now","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences evidence.","likes":9800},
+    {"claim":"A specific claim conservatives ARE ACTUALLY MAKING right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences evidence.","likes":21200},
+    {"claim":"A specific claim liberals ARE ACTUALLY MAKING right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences evidence.","likes":12800}
   ],
   "leftPosts": [],
   "rightPosts": [],
@@ -433,6 +530,7 @@ Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b 
   return stories;
 }
 
+
 // ─── AGENT 2: SOURCE FINDER ───────────────────────────────────────────────────
 // For each story, finds real news article URLs from left/centre/right outlets
 async function agentSourceFinder(story) {
@@ -440,9 +538,13 @@ async function agentSourceFinder(story) {
   const start = Date.now();
 
   const system = `You are a research assistant for MIDDLE news app. You have live web access.
-Your ONLY job: find real, working news article URLs about a specific story.
+Your ONLY job: find real, working news article URLs published in the LAST 24 HOURS about a specific story.
 Return ONLY a raw JSON object. No markdown. No commentary.
-CRITICAL: Every URL must be a real article you found via web search. Never invent URLs.`;
+CRITICAL RULES:
+1. Every URL must be from an article published TODAY or yesterday — last 24 hours only
+2. Every URL must be exact — copied from your search results, never constructed or guessed
+3. If you cannot find a verified recent article from an outlet, omit it completely
+4. 2 real verified URLs is better than 10 invented ones`;
 
   const thisYear = new Date().getFullYear();
   const todayStr = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
@@ -571,10 +673,10 @@ Only fix genuine errors — do not change things that are accurate.`;
   }
 }
 
-// ─── FULL PIPELINE: Writer → Sources → Verify → Image ────────────────────────
-async function processBatch(batchNum) {
-  // Step 1: Write all 5 stories
-  const stories = await agentWriter(batchNum);
+// ─── FULL PIPELINE: Headlines → Writer → Sources → Verify → Image ────────────
+async function processBatch(batchNum, allHeadlines) {
+  // Step 1: Write all 5 stories using real headlines as source material
+  const stories = await agentWriter(batchNum, allHeadlines);
 
   // Step 2: For each story, find sources + verify + get image
   // Run source finding and verification in sequence per story
@@ -629,9 +731,14 @@ async function main() {
   console.log("Date: " + today);
   console.log("Pipeline: Writer > Source Finder > Verifier > Image");
 
+  // Fetch today's real headlines from trusted sources FIRST
+  console.log("Fetching today\'s headlines from trusted sources...");
+  const allHeadlines = await fetchNewsAPIHeadlines();
+  console.log("Headlines ready: " + allHeadlines.length + " total\n");
+
   // Batch 1 through full pipeline
   console.log("\n=== BATCH 1 ===");
-  const batch1 = await processBatch(1);
+  const batch1 = await processBatch(1, allHeadlines);
 
   await fsSet("storyCache/" + today, {
     storiesJson: JSON.stringify(batch1),
@@ -640,9 +747,9 @@ async function main() {
   });
   console.log("Batch 1 saved -- " + batch1.length + " stories");
 
-  // Batch 2
+  // Batch 2 using same headlines
   console.log("\n=== BATCH 2 ===");
-  const batch2 = await processBatch(2);
+  const batch2 = await processBatch(2, allHeadlines);
 
   const all = [...batch1, ...batch2];
   await fsSet("storyCache/" + today, {
@@ -846,9 +953,13 @@ async function agentSourceFinder(story) {
   const start = Date.now();
 
   const system = `You are a research assistant for MIDDLE news app. You have live web access.
-Your ONLY job: find real, working news article URLs about a specific story.
+Your ONLY job: find real, working news article URLs published in the LAST 24 HOURS about a specific story.
 Return ONLY a raw JSON object. No markdown. No commentary.
-CRITICAL: Every URL must be a real article you found via web search. Never invent URLs.`;
+CRITICAL RULES:
+1. Every URL must be from an article published TODAY or yesterday — last 24 hours only
+2. Every URL must be exact — copied from your search results, never constructed or guessed
+3. If you cannot find a verified recent article from an outlet, omit it completely
+4. 2 real verified URLs is better than 10 invented ones`;
 
   const user = `Search the web right now for news articles about this story:
 "${story.topic}"
@@ -975,10 +1086,10 @@ Only fix genuine errors — do not change things that are accurate.`;
   }
 }
 
-// ─── FULL PIPELINE: Writer → Sources → Verify → Image ────────────────────────
-async function processBatch(batchNum) {
-  // Step 1: Write all 5 stories
-  const stories = await agentWriter(batchNum);
+// ─── FULL PIPELINE: Headlines → Writer → Sources → Verify → Image ────────────
+async function processBatch(batchNum, allHeadlines) {
+  // Step 1: Write all 5 stories using real headlines as source material
+  const stories = await agentWriter(batchNum, allHeadlines);
 
   // Step 2: For each story, find sources + verify + get image
   // Run source finding and verification in sequence per story
@@ -1033,9 +1144,14 @@ async function main() {
   console.log("Date: " + today);
   console.log("Pipeline: Writer > Source Finder > Verifier > Image");
 
+  // Fetch today's real headlines from trusted sources FIRST
+  console.log("Fetching today\'s headlines from trusted sources...");
+  const allHeadlines = await fetchNewsAPIHeadlines();
+  console.log("Headlines ready: " + allHeadlines.length + " total\n");
+
   // Batch 1 through full pipeline
   console.log("\n=== BATCH 1 ===");
-  const batch1 = await processBatch(1);
+  const batch1 = await processBatch(1, allHeadlines);
 
   await fsSet("storyCache/" + today, {
     storiesJson: JSON.stringify(batch1),
@@ -1044,9 +1160,9 @@ async function main() {
   });
   console.log("Batch 1 saved -- " + batch1.length + " stories");
 
-  // Batch 2
+  // Batch 2 using same headlines
   console.log("\n=== BATCH 2 ===");
-  const batch2 = await processBatch(2);
+  const batch2 = await processBatch(2, allHeadlines);
 
   const all = [...batch1, ...batch2];
   await fsSet("storyCache/" + today, {
