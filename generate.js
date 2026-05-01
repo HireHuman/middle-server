@@ -444,37 +444,39 @@ Your ONLY job: find real, working news article URLs about a specific story.
 Return ONLY a raw JSON object. No markdown. No commentary.
 CRITICAL: Every URL must be a real article you found via web search. Never invent URLs.`;
 
-  const user = `Search the web right now for news articles about this story:
+  const thisYear = new Date().getFullYear();
+  const todayStr = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
+  const user = `TODAY IS ${todayStr}. Search the web RIGHT NOW for recent ${thisYear} news articles about:
 "${story.topic}"
 
-Search query: "${story.searchQuery}"
+Search queries to use:
+- "${story.searchQuery} ${thisYear}"
+- "${story.topic} news ${thisYear}"
 
-Find real articles from these outlets if they covered this story:
+CRITICAL RULES — READ CAREFULLY:
+1. Only return URLs from ${thisYear} articles — NO articles from 2022, 2023, or 2024
+2. Every URL must be an exact URL from your live web search results — NOT constructed or guessed
+3. If you cannot find a real verified article from an outlet, omit that outlet completely
+4. 2 real URLs is better than 10 invented ones
+5. Check that each URL contains ${thisYear} or recent date indicators
 
+Find real ${thisYear} articles from these outlets if they covered this story:
 LEFT: CNN, MSNBC, New York Times, Washington Post, The Guardian, NPR, HuffPost, Vox, The Atlantic, Politico
 CENTRE: Reuters, Associated Press, BBC, Axios, The Hill, Bloomberg, Newsweek, USA Today
 RIGHT: Fox News, New York Post, Wall Street Journal, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
 
-Return this JSON:
+Return ONLY this JSON with real URLs you found:
 {
   "left": [
-    {"outlet":"CNN","url":"https://cnn.com/REAL-ARTICLE-PATH","headline":"Exact headline from the article","bias":"left"}
+    {"outlet":"CNN","url":"https://cnn.com/EXACT-URL-FROM-SEARCH","headline":"Exact article headline","bias":"left"}
   ],
   "centre": [
-    {"outlet":"Reuters","url":"https://reuters.com/REAL-ARTICLE-PATH","headline":"Exact headline","bias":"centre"}
+    {"outlet":"Reuters","url":"https://reuters.com/EXACT-URL-FROM-SEARCH","headline":"Exact headline","bias":"centre"}
   ],
   "right": [
-    {"outlet":"Fox News","url":"https://foxnews.com/REAL-ARTICLE-PATH","headline":"Exact headline","bias":"right"}
+    {"outlet":"Fox News","url":"https://foxnews.com/EXACT-URL-FROM-SEARCH","headline":"Exact headline","bias":"right"}
   ]
-}
-
-Rules:
-- Only include outlets that ACTUALLY published an article about this specific story
-- Every URL must be real and working — you found it via web search
-- Include the exact article headline
-- Aim for 3-5 outlets per category where available
-- If an outlet did not cover this story, omit it entirely
-- Do NOT invent or guess URLs`;
+}`
 
   try {
     const text = await callGrok(system, user, 8000);
