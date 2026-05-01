@@ -130,6 +130,7 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
     req.end();
   });
 
+  if (result.status === 429) throw new Error("Grok rate limit — credits exhausted or too many requests");
   if (result.status !== 200) throw new Error(`Grok API ${result.status}: ${result.body.slice(0,300)}`);
   const parsed = JSON.parse(result.body);
   return parsed.choices?.[0]?.message?.content || "";
@@ -266,13 +267,14 @@ async function fetchNewsImage(searchQuery) {
 // ─── AGENT 1: STORY SCOUT + WRITER ───────────────────────────────────────────
 // Receives real headlines, selects the most important stories,
 // writes full editorial content
-async function agentWriter(batch, headlines) {
+async function agentWriter(batch, headlines, excludeTopics=[]) {
   const today = new Date().toLocaleDateString("en-US", {
     weekday:"long", month:"long", day:"numeric", year:"numeric"
   });
   const batchInstr = batch === 1
     ? "Select the TOP 5 most politically significant stories."
-    : "Select the NEXT 5 most politically significant stories. Do NOT repeat any story from batch 1.";
+    : "Select the NEXT 5 most politically significant stories. Do NOT repeat any story from batch 1. " +
+      (excludeTopics.length > 0 ? "Stories already covered (do NOT select these): " + excludeTopics.join("; ") : "");
 
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
@@ -391,8 +393,21 @@ Return this JSON (only include outlets where you found a real article):
 }`;
 
   try {
-    const text = await callGrok(system, user, 6000);
+    const text = await callGrok(system, user, 8000);
     const elapsed = ((Date.now()-start)/1000).toFixed(1);
+    console.log("    Agent 2 raw response length: " + text.length + " chars");
+    console.log("    Agent 2 raw preview: " + text.slice(0,100));
+    if (text.length < 10) {
+      console.warn("    Agent 2 returned empty response — retrying once...");
+      await new Promise(r => setTimeout(r, 3000));
+      const text2 = await callGrok(system, user, 8000);
+      console.log("    Agent 2 retry length: " + text2.length + " chars");
+      if (text2.length < 10) return { left:[], centre:[], right:[] };
+      const coverage2 = parseJSON(text2);
+      const total2 = (coverage2.left?.length||0)+(coverage2.centre?.length||0)+(coverage2.right?.length||0);
+      console.log("    Agent 2 retry: " + total2 + " sources found");
+      return coverage2;
+    }
     const coverage = parseJSON(text);
     const total = (coverage.left?.length||0)+(coverage.centre?.length||0)+(coverage.right?.length||0);
     console.log("    Agent 2 done in " + elapsed + "s — " + total + " sources found");
@@ -411,6 +426,9 @@ async function agentVerifier(story) {
 
   const system = `You are a senior fact-checker for MIDDLE, a nonpartisan news app. You have live web access.
 Your job: review a story's fact checks and fix any errors in side assignment or verdicts.
+CRITICAL: The only valid values for "side" are "left" or "right". Never use "neutral", "both", or any other value.
+- side="right" means conservatives/Republicans are making this claim
+- side="left" means liberals/Democrats are making this claim
 Return ONLY a raw JSON object. No markdown. No commentary.`;
 
   const fcList = (story.factChecks||[])
@@ -448,6 +466,11 @@ Only flag genuine errors.`;
     for (const fix of corrections) {
       if (typeof fix.index === 'number' && fix.index >= 0 && fix.index < (story.factChecks||[]).length) {
         const oldVal = story.factChecks[fix.index][fix.field];
+        // Reject invalid side values — only left/right allowed
+        if (fix.field === "side" && !["left","right"].includes(fix.newValue)) {
+          console.log("    SKIPPED invalid side value: " + fix.newValue);
+          continue;
+        }
         story.factChecks[fix.index][fix.field] = fix.newValue;
         console.log("    Fixed factCheck[" + fix.index + "] " + fix.field + ": " + oldVal + " → " + fix.newValue);
       }
@@ -461,8 +484,8 @@ Only flag genuine errors.`;
 }
 
 // ─── FULL PIPELINE ────────────────────────────────────────────────────────────
-async function processBatch(batchNum, headlines) {
-  const stories = await agentWriter(batchNum, headlines);
+async function processBatch(batchNum, headlines, excludeTopics=[]) {
+  const stories = await agentWriter(batchNum, headlines, excludeTopics);
   const processed = [];
 
   for (let i = 0; i < stories.length; i++) {
@@ -528,9 +551,10 @@ async function main() {
   });
   console.log("\nBatch 1 saved — " + batch1.length + " stories");
 
-  // Batch 2
+  // Batch 2 — exclude batch 1 topics to prevent duplicates
+  const batch1Topics = batch1.map(s => s.topic);
   console.log("\n=== BATCH 2 ===");
-  const batch2 = await processBatch(2, headlines);
+  const batch2 = await processBatch(2, headlines, batch1Topics);
 
   const all = [...batch1, ...batch2];
   await fsSet("storyCache/" + today, {
