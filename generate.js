@@ -198,40 +198,34 @@ async function fetchTodaysHeadlines() {
   if (!NEWS_API_KEY) { console.log("  No NEWS_API_KEY set"); return []; }
 
   const headlines = [];
+  // Use just ONE call to save our daily quota — top-headlines is most reliable
+  // and returns the most current important stories
+  try {
+    const url = `https://newsapi.org/v2/top-headlines?country=us&pageSize=100&apiKey=${NEWS_API_KEY}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.log("  NewsAPI failed: " + res.status);
+      return [];
+    }
+    const data = await res.json();
+    const articles = (data.articles||[]).filter(a =>
+      a.title && a.url &&
+      !a.title.includes("[Removed]") &&
+      a.source?.name !== "Removed"
+    );
+    console.log("  NewsAPI: " + articles.length + " headlines fetched");
+    for (const a of articles) {
+      headlines.push({
+        title: a.title,
+        url: a.url,
+        source: a.source?.name || "Unknown",
+        publishedAt: a.publishedAt,
+        description: a.description || "",
+      });
+    }
+  } catch(e) { console.warn("  NewsAPI fetch error: " + e.message); }
 
-  // Use top-headlines with country=us and category=general/politics
-  // This endpoint works reliably on free tier
-  const endpoints = [
-    `https://newsapi.org/v2/top-headlines?country=us&category=general&pageSize=30&apiKey=${NEWS_API_KEY}`,
-    `https://newsapi.org/v2/top-headlines?country=us&category=politics&pageSize=20&apiKey=${NEWS_API_KEY}`,
-    `https://newsapi.org/v2/everything?q=congress+OR+senate+OR+president+OR+supreme+court&sortBy=publishedAt&pageSize=30&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`,
-  ];
-
-  for (const url of endpoints) {
-    try {
-      await new Promise(r => setTimeout(r, 500));
-      const res = await fetch(url);
-      if (!res.ok) { console.log("  NewsAPI endpoint failed: " + res.status); continue; }
-      const data = await res.json();
-      const articles = (data.articles||[]).filter(a =>
-        a.title && a.url &&
-        !a.title.includes("[Removed]") &&
-        a.source?.name !== "Removed"
-      );
-      console.log("  NewsAPI: " + articles.length + " headlines from " + url.slice(0,60) + "...");
-      for (const a of articles) {
-        headlines.push({
-          title: a.title,
-          url: a.url,
-          source: a.source?.name || "Unknown",
-          publishedAt: a.publishedAt,
-          description: a.description || "",
-        });
-      }
-    } catch(e) { console.warn("  NewsAPI fetch error: " + e.message); }
-  }
-
-  // Deduplicate by title similarity
+  // Deduplicate
   const seen = new Set();
   const unique = headlines.filter(h => {
     const key = h.title.slice(0,40).toLowerCase();
@@ -296,13 +290,19 @@ async function agentWriter(batch, headlines, excludeTopics=[]) {
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
 
+  if (headlines.length === 0) {
+    console.warn("  WARNING: No headlines available — Agent 1 will use live web search");
+    console.warn("  This may produce less accurate stories. Check NewsAPI quota.");
+  }
+
   // Format headlines for context
   const headlineText = headlines.length > 0
-    ? "Here are today's real news headlines to choose from:\n\n" +
-      headlines.slice(0, 60).map((h,i) =>
-        `${i+1}. "${h.title}" — ${h.source} (${h.url})`
-      ).join("\n")
-    : "No pre-fetched headlines available. Use your live web search to find today's top US political stories from the last 24 hours.";
+    ? "Here are today's REAL verified news headlines published in the last 24 hours. You MUST select stories from this list:\n\n" +
+      headlines.slice(0, 80).map((h,i) =>
+        `${i+1}. [${h.source}] "${h.title}" — ${h.url}`
+      ).join("\n") +
+      "\n\nOnly write stories about events listed above. Do not invent stories not in this list."
+    : "No pre-fetched headlines available. Search the web for today's top US political news from the last 24 hours only.";
 
   const system = `You are the lead editorial writer for MIDDLE, a nonpartisan news app. You have live web access.
 Today is ${today}.
@@ -428,41 +428,18 @@ async function agentSourceFinder(story, allHeadlines) {
   const matched = allHeadlines.filter(h => {
     const title = (h.title || "").toLowerCase();
     const desc  = (h.description || "").toLowerCase();
-    const matches = keywords.filter(kw => title.includes(kw) || desc.includes(kw));
-    return matches.length >= Math.min(2, keywords.length);
+    const combined = title + " " + desc;
+    // Match on ANY keyword — more lenient to catch related coverage
+    return keywords.some(kw => combined.includes(kw));
   });
 
   console.log("    NewsAPI matches: " + matched.length + " articles");
 
   // Step 2: Also fetch more specific NewsAPI results for this story
   const extraArticles = [];
-  if (NEWS_API_KEY) {
-    // Try up to 2 different search queries to find more sources
-    const searchQueries = [
-      (story.searchQuery || story.topic).slice(0,80),
-      // Shorter fallback using just main keywords
-      story.topic.split(" ").filter(w=>w.length>4).slice(0,3).join(" ")
-    ].filter((q,i,arr) => q && arr.indexOf(q) === i); // dedupe
-
-    for (const sq of searchQueries) {
-      try {
-        const q = encodeURIComponent(sq);
-        const from = new Date(Date.now() - 72*60*60*1000).toISOString().slice(0,10);
-        const url = `https://newsapi.org/v2/everything?q=${q}&from=${from}&sortBy=relevancy&pageSize=20&language=en&apiKey=${NEWS_API_KEY}`;
-        await new Promise(r => setTimeout(r, 500));
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          const arts = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
-          console.log("    NewsAPI search \"" + sq.slice(0,40) + "\": " + arts.length + " results");
-          extraArticles.push(...arts.map(a => ({
-            title: a.title, url: a.url,
-            source: a.source?.name || "", description: a.description || ""
-          })));
-        }
-      } catch(e) { console.warn("    NewsAPI search failed: " + e.message); }
-    }
-  }
+  // No extra NewsAPI calls here — we use only the headlines already fetched
+  // to stay within the free tier limit of 100 requests/day
+  // Images use separate calls budgeted at end of pipeline
 
   // Combine matched + extra, dedupe by URL
   const allArticles = [...matched, ...extraArticles];
