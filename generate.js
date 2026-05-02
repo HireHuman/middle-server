@@ -102,7 +102,6 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
   const body = JSON.stringify({
     model: "grok-3",
     max_tokens: maxTokens,
-    tools: [{ type: "web_search" }],
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user",   content: userPrompt   },
