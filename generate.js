@@ -96,12 +96,13 @@ function parseJSON(text) {
   }
 }
 
-// ─── Grok API call ────────────────────────────────────────────────────────────
+// ─── Grok API call (Chat Completions — no web search) ────────────────────────
 async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
   const { default: https } = await import('https');
   const body = JSON.stringify({
     model: "grok-3",
     max_tokens: maxTokens,
+    tools: [{ type: "web_search" }],
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user",   content: userPrompt   },
@@ -134,6 +135,59 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
   if (result.status !== 200) throw new Error(`Grok API ${result.status}: ${result.body.slice(0,300)}`);
   const parsed = JSON.parse(result.body);
   return parsed.choices?.[0]?.message?.content || "";
+}
+
+// ─── Grok Responses API call (WITH web search tool) ──────────────────────────
+async function callGrokWithSearch(systemPrompt, userPrompt, maxTokens = 8000) {
+  const { default: https } = await import('https');
+
+  const body = JSON.stringify({
+    model: "grok-3",
+    max_tokens: maxTokens,
+    tools: [{ type: "web_search" }],
+    input: [
+      { role: "system", content: systemPrompt },
+      { role: "user",   content: userPrompt   },
+    ]
+  });
+
+  const result = await new Promise((resolve, reject) => {
+    const options = {
+      hostname: "api.x.ai",
+      path: "/v1/responses",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROK_API_KEY}`,
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+    let data = "";
+    const req = https.request(options, res => {
+      res.on("data", chunk => { data += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on("error", reject);
+    req.setTimeout(300000, () => { req.destroy(); reject(new Error("Grok search timeout")); });
+    req.write(body);
+    req.end();
+  });
+
+  if (result.status === 429) throw new Error("Grok rate limit");
+  if (result.status !== 200) throw new Error("Grok Responses API " + result.status + ": " + result.body.slice(0,300));
+
+  const parsed = JSON.parse(result.body);
+  // Responses API returns output array
+  const output = parsed.output || [];
+  let text = "";
+  for (const item of output) {
+    if (item.type === "message") {
+      for (const content of (item.content || [])) {
+        if (content.type === "output_text") text += content.text;
+      }
+    }
+  }
+  return text || "";
 }
 
 // ─── URL validator ────────────────────────────────────────────────────────────
@@ -393,14 +447,14 @@ Return this JSON (only include outlets where you found a real article):
 }`;
 
   try {
-    const text = await callGrok(system, user, 8000);
+    const text = await callGrokWithSearch(system, user, 8000);
     const elapsed = ((Date.now()-start)/1000).toFixed(1);
     console.log("    Agent 2 raw response length: " + text.length + " chars");
     console.log("    Agent 2 raw preview: " + text.slice(0,100));
     if (text.length < 10) {
       console.warn("    Agent 2 returned empty response — retrying once...");
       await new Promise(r => setTimeout(r, 3000));
-      const text2 = await callGrok(system, user, 8000);
+      const text2 = await callGrokWithSearch(system, user, 8000);
       console.log("    Agent 2 retry length: " + text2.length + " chars");
       if (text2.length < 10) return { left:[], centre:[], right:[] };
       const coverage2 = parseJSON(text2);
