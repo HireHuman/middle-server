@@ -137,8 +137,25 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
 }
 
 // ─── URL validator ────────────────────────────────────────────────────────────
+// Outlets that block HEAD requests but are valid news sources
+const TRUSTED_DOMAINS = [
+  "washingtonpost.com", "nytimes.com", "wsj.com", "ft.com",
+  "theatlantic.com", "newyorker.com", "economist.com",
+  "bloomberg.com", "businessinsider.com"
+];
+
 async function validateUrl(url) {
   if (!url || !url.startsWith('http')) return false;
+
+  // Skip validation for trusted paywalled outlets — they block HEAD requests
+  try {
+    const hostname = new URL(url).hostname.replace("www.", "");
+    if (TRUSTED_DOMAINS.some(d => hostname.includes(d))) {
+      console.log("  TRUSTED (skipping validation): " + hostname);
+      return true;
+    }
+  } catch(e) {}
+
   try {
     const { default: https } = await import('https');
     const { default: http }  = await import('http');
@@ -420,21 +437,31 @@ async function agentSourceFinder(story, allHeadlines) {
   // Step 2: Also fetch more specific NewsAPI results for this story
   const extraArticles = [];
   if (NEWS_API_KEY) {
-    try {
-      const q = encodeURIComponent((story.searchQuery || story.topic).slice(0,100));
-      const from = new Date(Date.now() - 48*60*60*1000).toISOString().slice(0,10);
-      const url = `https://newsapi.org/v2/everything?q=${q}&from=${from}&sortBy=relevancy&pageSize=20&language=en&apiKey=${NEWS_API_KEY}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        const arts = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
-        console.log("    NewsAPI targeted search: " + arts.length + " results");
-        extraArticles.push(...arts.map(a => ({
-          title: a.title, url: a.url,
-          source: a.source?.name || "", description: a.description || ""
-        })));
-      }
-    } catch(e) { console.warn("    Targeted NewsAPI failed: " + e.message); }
+    // Try up to 2 different search queries to find more sources
+    const searchQueries = [
+      (story.searchQuery || story.topic).slice(0,80),
+      // Shorter fallback using just main keywords
+      story.topic.split(" ").filter(w=>w.length>4).slice(0,3).join(" ")
+    ].filter((q,i,arr) => q && arr.indexOf(q) === i); // dedupe
+
+    for (const sq of searchQueries) {
+      try {
+        const q = encodeURIComponent(sq);
+        const from = new Date(Date.now() - 72*60*60*1000).toISOString().slice(0,10);
+        const url = `https://newsapi.org/v2/everything?q=${q}&from=${from}&sortBy=relevancy&pageSize=20&language=en&apiKey=${NEWS_API_KEY}`;
+        await new Promise(r => setTimeout(r, 500));
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          const arts = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
+          console.log("    NewsAPI search \"" + sq.slice(0,40) + "\": " + arts.length + " results");
+          extraArticles.push(...arts.map(a => ({
+            title: a.title, url: a.url,
+            source: a.source?.name || "", description: a.description || ""
+          })));
+        }
+      } catch(e) { console.warn("    NewsAPI search failed: " + e.message); }
+    }
   }
 
   // Combine matched + extra, dedupe by URL
@@ -565,12 +592,18 @@ async function processBatch(batchNum, headlines, excludeTopics=[]) {
     // Image
     const delay = i * 3500;
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
-    const queries = [story.searchQuery, story.topic.split(" ").slice(0,4).join(" ")].filter(Boolean);
+    // Try multiple image queries — short keywords work best
+    const topicWords = story.topic.split(" ").filter(w => w.length > 3 && !["that","this","with","from","over","into","amid","have","been","will","they","them","their","after","about","would"].includes(w.toLowerCase()));
+    const queries = [
+      story.searchQuery,
+      topicWords.slice(0,4).join(" "),
+      topicWords.slice(0,3).join(" "),
+    ].filter(Boolean);
     let image = { imageUrl:null, imageCredit:null, imageArticleUrl:null };
     for (const q of queries) {
       image = await fetchNewsImage(q).catch(() => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
-      if (image.imageUrl) { console.log("  Image found"); break; }
-      await new Promise(r => setTimeout(r, 1000));
+      if (image.imageUrl) { console.log("  Image found: " + q.slice(0,40)); break; }
+      await new Promise(r => setTimeout(r, 800));
     }
     story.imageUrl        = image.imageUrl;
     story.imageCredit     = image.imageCredit;
