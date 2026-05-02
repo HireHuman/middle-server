@@ -136,59 +136,6 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
   return parsed.choices?.[0]?.message?.content || "";
 }
 
-// ─── Grok Responses API call (WITH web search tool) ──────────────────────────
-async function callGrokWithSearch(systemPrompt, userPrompt, maxTokens = 8000) {
-  const { default: https } = await import('https');
-
-  const body = JSON.stringify({
-    model: "grok-3",
-    max_tokens: maxTokens,
-    tools: [{ type: "web_search" }],
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user",   content: userPrompt   },
-    ]
-  });
-
-  const result = await new Promise((resolve, reject) => {
-    const options = {
-      hostname: "api.x.ai",
-      path: "/v1/responses",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROK_API_KEY}`,
-        "Content-Length": Buffer.byteLength(body),
-      },
-    };
-    let data = "";
-    const req = https.request(options, res => {
-      res.on("data", chunk => { data += chunk; });
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
-    });
-    req.on("error", reject);
-    req.setTimeout(300000, () => { req.destroy(); reject(new Error("Grok search timeout")); });
-    req.write(body);
-    req.end();
-  });
-
-  if (result.status === 429) throw new Error("Grok rate limit");
-  if (result.status !== 200) throw new Error("Grok Responses API " + result.status + ": " + result.body.slice(0,300));
-
-  const parsed = JSON.parse(result.body);
-  // Responses API returns output array
-  const output = parsed.output || [];
-  let text = "";
-  for (const item of output) {
-    if (item.type === "message") {
-      for (const content of (item.content || [])) {
-        if (content.type === "output_text") text += content.text;
-      }
-    }
-  }
-  return text || "";
-}
-
 // ─── URL validator ────────────────────────────────────────────────────────────
 async function validateUrl(url) {
   if (!url || !url.startsWith('http')) return false;
@@ -397,78 +344,135 @@ Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b 
 }
 
 // ─── AGENT 2: SOURCE FINDER ───────────────────────────────────────────────────
-// Finds real article URLs from left/centre/right outlets for each story
-async function agentSourceFinder(story) {
+// Matches each story against the real NewsAPI headlines already fetched
+// No extra API calls — uses headlines we already have with verified URLs
+// Outlet bias classifications
+const OUTLET_BIAS_MAP = {
+  // Left
+  "cnn": "left", "msnbc": "left", "nytimes": "left", "washingtonpost": "left",
+  "theguardian": "left", "guardian": "left", "npr": "left", "huffpost": "left",
+  "huffingtonpost": "left", "vox": "left", "theatlantic": "left", "atlantic": "left",
+  "politico": "left", "slate": "left", "salon": "left", "motherjones": "left",
+  "thenation": "left", "newrepublic": "left",
+  // Centre
+  "reuters": "centre", "apnews": "centre", "ap": "centre", "bbc": "centre",
+  "axios": "centre", "thehill": "centre", "bloomberg": "centre",
+  "newsweek": "centre", "time": "centre", "usatoday": "centre",
+  "cbsnews": "centre", "abcnews": "centre", "nbcnews": "centre",
+  "pbs": "centre", "pbsnewshour": "centre", "csmonitor": "centre",
+  // Right
+  "foxnews": "right", "fox": "right", "nypost": "right", "wsj": "right",
+  "washingtonexaminer": "right", "examiner": "right", "dailywire": "right",
+  "breitbart": "right", "nationalreview": "right", "dailycaller": "right",
+  "newsmax": "right", "washingtontimes": "right", "thefederalist": "right",
+  "townhall": "right", "theblaze": "right", "epochtimes": "right",
+};
+
+function getOutletBiasFromUrl(url) {
+  try {
+    const hostname = new URL(url).hostname.replace("www.", "");
+    const domain = hostname.split(".")[0].toLowerCase();
+    return OUTLET_BIAS_MAP[domain] || OUTLET_BIAS_MAP[hostname.replace(".com","").replace(".org","").replace(".net","")] || null;
+  } catch(e) { return null; }
+}
+
+function getOutletNameFromUrl(url) {
+  try {
+    const hostname = new URL(url).hostname.replace("www.", "");
+    const names = {
+      "cnn.com": "CNN", "msnbc.com": "MSNBC", "nytimes.com": "New York Times",
+      "washingtonpost.com": "Washington Post", "theguardian.com": "The Guardian",
+      "npr.org": "NPR", "huffpost.com": "HuffPost", "vox.com": "Vox",
+      "theatlantic.com": "The Atlantic", "politico.com": "Politico",
+      "reuters.com": "Reuters", "apnews.com": "Associated Press",
+      "bbc.com": "BBC", "bbc.co.uk": "BBC", "axios.com": "Axios",
+      "thehill.com": "The Hill", "bloomberg.com": "Bloomberg",
+      "newsweek.com": "Newsweek", "time.com": "Time", "usatoday.com": "USA Today",
+      "cbsnews.com": "CBS News", "abcnews.go.com": "ABC News", "nbcnews.com": "NBC News",
+      "foxnews.com": "Fox News", "nypost.com": "New York Post", "wsj.com": "Wall Street Journal",
+      "washingtonexaminer.com": "Washington Examiner", "dailywire.com": "Daily Wire",
+      "breitbart.com": "Breitbart", "nationalreview.com": "National Review",
+      "dailycaller.com": "Daily Caller", "newsmax.com": "Newsmax",
+    };
+    return names[hostname] || hostname.replace(".com","").replace(".org","").replace(".net","");
+  } catch(e) { return "Unknown"; }
+}
+
+async function agentSourceFinder(story, allHeadlines) {
   console.log("  Agent 2 (Sources) for: \"" + story.topic.slice(0,55) + "\"");
   const start = Date.now();
-  const today = new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
-  const year  = new Date().getFullYear();
 
-  const system = `You are a research librarian for MIDDLE news app. You have live web search access.
-Your ONLY job: find real article URLs published TODAY or YESTERDAY about a specific news story.
-Rules:
-- Search the web right now using your live search capability
-- Only return URLs from articles published in ${year} — specifically today or yesterday if possible
-- Copy URLs EXACTLY as they appear in search results — never modify or construct URLs
-- If you cannot find a verified working URL from an outlet, omit it
-- Return ONLY the JSON object — no commentary`;
+  // Step 1: Match from NewsAPI headlines we already have
+  const keywords = (story.searchQuery || story.topic)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(w => w.length > 3);
 
-  const user = `Today is ${today}. Search the web RIGHT NOW for news articles about:
+  const matched = allHeadlines.filter(h => {
+    const title = (h.title || "").toLowerCase();
+    const desc  = (h.description || "").toLowerCase();
+    const matches = keywords.filter(kw => title.includes(kw) || desc.includes(kw));
+    return matches.length >= Math.min(2, keywords.length);
+  });
 
-"${story.topic}"
+  console.log("    NewsAPI matches: " + matched.length + " articles");
 
-Search terms to use: "${story.searchQuery} ${year}" and "${story.topic}"
-
-Find articles published TODAY or YESTERDAY from these outlets:
-
-LEFT-LEANING: CNN (cnn.com), NPR (npr.org), The Guardian (theguardian.com), HuffPost (huffpost.com), Vox (vox.com), Politico (politico.com), The Atlantic (theatlantic.com)
-
-CENTRE: Reuters (reuters.com), Associated Press (apnews.com), BBC (bbc.com), Axios (axios.com), The Hill (thehill.com), Bloomberg (bloomberg.com), Newsweek (newsweek.com)
-
-RIGHT-LEANING: Fox News (foxnews.com), New York Post (nypost.com), Washington Examiner (washingtonexaminer.com), Daily Wire (dailywire.com), Breitbart (breitbart.com), National Review (nationalreview.com), Daily Caller (dailycaller.com)
-
-For each outlet you find, verify:
-1. The article was published in ${year}
-2. The URL is complete and exact from your search results
-3. The article is specifically about this story
-
-Return this JSON (only include outlets where you found a real article):
-{
-  "left": [
-    {"outlet":"CNN","url":"https://cnn.com/EXACT-URL-FROM-SEARCH-RESULTS","headline":"Exact article headline","bias":"left"}
-  ],
-  "centre": [
-    {"outlet":"Reuters","url":"https://reuters.com/EXACT-URL","headline":"Exact headline","bias":"centre"}
-  ],
-  "right": [
-    {"outlet":"Fox News","url":"https://foxnews.com/EXACT-URL","headline":"Exact headline","bias":"right"}
-  ]
-}`;
-
-  try {
-    const text = await callGrokWithSearch(system, user, 8000);
-    const elapsed = ((Date.now()-start)/1000).toFixed(1);
-    console.log("    Agent 2 raw response length: " + text.length + " chars");
-    console.log("    Agent 2 raw preview: " + text.slice(0,100));
-    if (text.length < 10) {
-      console.warn("    Agent 2 returned empty response — retrying once...");
-      await new Promise(r => setTimeout(r, 3000));
-      const text2 = await callGrokWithSearch(system, user, 8000);
-      console.log("    Agent 2 retry length: " + text2.length + " chars");
-      if (text2.length < 10) return { left:[], centre:[], right:[] };
-      const coverage2 = parseJSON(text2);
-      const total2 = (coverage2.left?.length||0)+(coverage2.centre?.length||0)+(coverage2.right?.length||0);
-      console.log("    Agent 2 retry: " + total2 + " sources found");
-      return coverage2;
-    }
-    const coverage = parseJSON(text);
-    const total = (coverage.left?.length||0)+(coverage.centre?.length||0)+(coverage.right?.length||0);
-    console.log("    Agent 2 done in " + elapsed + "s — " + total + " sources found");
-    return coverage;
-  } catch(e) {
-    console.warn("    Agent 2 failed: " + e.message);
-    return { left:[], centre:[], right:[] };
+  // Step 2: Also fetch more specific NewsAPI results for this story
+  const extraArticles = [];
+  if (NEWS_API_KEY) {
+    try {
+      const q = encodeURIComponent((story.searchQuery || story.topic).slice(0,100));
+      const from = new Date(Date.now() - 48*60*60*1000).toISOString().slice(0,10);
+      const url = `https://newsapi.org/v2/everything?q=${q}&from=${from}&sortBy=relevancy&pageSize=20&language=en&apiKey=${NEWS_API_KEY}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const arts = (data.articles||[]).filter(a => a.title && a.url && !a.title.includes("[Removed]"));
+        console.log("    NewsAPI targeted search: " + arts.length + " results");
+        extraArticles.push(...arts.map(a => ({
+          title: a.title, url: a.url,
+          source: a.source?.name || "", description: a.description || ""
+        })));
+      }
+    } catch(e) { console.warn("    Targeted NewsAPI failed: " + e.message); }
   }
+
+  // Combine matched + extra, dedupe by URL
+  const allArticles = [...matched, ...extraArticles];
+  const seenUrls = new Set();
+  const unique = allArticles.filter(a => {
+    if (!a.url || seenUrls.has(a.url)) return false;
+    seenUrls.add(a.url);
+    return true;
+  });
+
+  // Classify by bias
+  const left = [], centre = [], right = [];
+  for (const article of unique) {
+    const bias = getOutletBiasFromUrl(article.url);
+    if (!bias) continue;
+    const item = {
+      outlet: getOutletNameFromUrl(article.url),
+      url: article.url,
+      headline: article.title,
+      bias
+    };
+    if (bias === "left")   left.push(item);
+    if (bias === "centre") centre.push(item);
+    if (bias === "right")  right.push(item);
+  }
+
+  // Limit to 5 per category, highest relevance first
+  const result = {
+    left:   left.slice(0, 5),
+    centre: centre.slice(0, 5),
+    right:  right.slice(0, 5),
+  };
+
+  const total = result.left.length + result.centre.length + result.right.length;
+  const elapsed = ((Date.now()-start)/1000).toFixed(1);
+  console.log("    Agent 2 done in " + elapsed + "s — " + total + " sources (" + result.left.length + "L " + result.centre.length + "C " + result.right.length + "R)");
+  return result;
 }
 
 // ─── AGENT 3: VERIFIER ────────────────────────────────────────────────────────
@@ -545,8 +549,8 @@ async function processBatch(batchNum, headlines, excludeTopics=[]) {
     let story = stories[i];
     console.log("\nProcessing story " + (i+1) + "/" + stories.length + ": \"" + story.topic.slice(0,55) + "\"");
 
-    // Agent 2: Find sources
-    story.newsCoverage = await agentSourceFinder(story);
+    // Agent 2: Find sources from NewsAPI headlines
+    story.newsCoverage = await agentSourceFinder(story, headlines);
     await new Promise(r => setTimeout(r, 1500));
 
     // Agent 3: Verify and fix
