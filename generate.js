@@ -141,7 +141,11 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
 const TRUSTED_DOMAINS = [
   "washingtonpost.com", "nytimes.com", "wsj.com", "ft.com",
   "theatlantic.com", "newyorker.com", "economist.com",
-  "bloomberg.com", "businessinsider.com"
+  "bloomberg.com", "businessinsider.com",
+  "axios.com", "politico.com", "thehill.com",
+  "foxnews.com", "dailywire.com", "nationalreview.com",
+  "breitbart.com", "dailycaller.com", "newsmax.com",
+  "washingtonexaminer.com", "nypost.com"
 ];
 
 async function validateUrl(url) {
@@ -233,6 +237,40 @@ async function fetchTodaysHeadlines() {
     seen.add(key);
     return true;
   });
+
+  // Second fetch specifically targeting right-leaning sources
+  // NewsAPI top-headlines skews left — this balances it
+  if (NEWS_API_KEY && unique.length > 0) {
+    try {
+      const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com&sortBy=publishedAt&pageSize=30&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
+      const res = await fetch(rightUrl);
+      if (res.ok) {
+        const data = await res.json();
+        const arts = (data.articles||[]).filter(a =>
+          a.title && a.url &&
+          !a.title.includes("[Removed]") &&
+          a.source?.name !== "Removed"
+        );
+        console.log("  NewsAPI right sources: " + arts.length + " headlines");
+        let added = 0;
+        for (const a of arts) {
+          const key = a.title.slice(0,40).toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            unique.push({
+              title: a.title, url: a.url,
+              source: a.source?.name || "Unknown",
+              publishedAt: a.publishedAt,
+              description: a.description || "",
+              lean: "right"
+            });
+            added++;
+          }
+        }
+        console.log("  Added " + added + " right-leaning headlines");
+      }
+    } catch(e) { console.warn("  Right sources fetch failed: " + e.message); }
+  }
 
   console.log("Total unique headlines: " + unique.length);
   return unique;
@@ -450,11 +488,21 @@ async function agentSourceFinder(story, allHeadlines) {
     return true;
   });
 
-  // Classify by bias
+  // Classify by bias — also filter for relevance to this specific story
+  const storyKeywordsSet = new Set(keywords);
   const left = [], centre = [], right = [];
   for (const article of unique) {
     const bias = getOutletBiasFromUrl(article.url);
     if (!bias) continue;
+
+    // Extra relevance check — article title must contain at least 1 story keyword
+    const articleTitle = (article.title || "").toLowerCase();
+    const isRelevant = keywords.some(kw => articleTitle.includes(kw));
+    if (!isRelevant && unique.length > 5) {
+      // Only skip if we have plenty of results — don't be too strict
+      continue;
+    }
+
     const item = {
       outlet: getOutletNameFromUrl(article.url),
       url: article.url,
