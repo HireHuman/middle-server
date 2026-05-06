@@ -325,6 +325,13 @@ async function agentWriter(batch, headlines, excludeTopics=[]) {
     ? "Select the TOP 5 most politically significant stories."
     : "Select the NEXT 5 most politically significant stories. Do NOT repeat any story from batch 1. " +
       (excludeTopics.length > 0 ? "Stories already covered (do NOT select these): " + excludeTopics.join("; ") : "");
+  // Story quality rules added to both batches
+  const qualityRules = `
+STORY SELECTION RULES:
+- Only select stories with genuine political significance — policy, legislation, elections, courts, national security, economy
+- Do NOT select: celebrity news, sports, entertainment, viral memes, social media trends, lifestyle stories
+- Do NOT select stories about Trump social media posts or memes unless they have direct policy implications
+- Prioritise stories that affect millions of Americans or have lasting political consequences`;
 
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
@@ -351,6 +358,7 @@ Return ONLY a raw JSON array. No markdown. No code fences. Start with [ end with
 Properly escape all strings. No raw newlines inside strings. No trailing commas.`;
 
   const user = `${batchInstr}
+${qualityRules}
 
 ${headlineText}
 
@@ -542,7 +550,8 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     // Also check if article URL contains the current year (more likely to be relevant)
     const urlHasYear = (article.url||"").includes("2026") || (article.url||"").includes("2025");
 
-    const isRelevant = (kwMatches >= 2 && urlHasYear) || (kwMatches >= 3) || (hasProperNoun && kwMatches >= 1 && urlHasYear);
+    // Relax year requirement — many valid outlets don't include year in URL path
+    const isRelevant = kwMatches >= 2 || (hasProperNoun && kwMatches >= 1) || (kwMatches >= 1 && urlHasYear);
     if (!isRelevant) continue;
 
     const item = {
