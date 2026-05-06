@@ -204,41 +204,69 @@ async function fetchTodaysHeadlines() {
   const from = new Date(Date.now() - 86400000).toISOString().slice(0,10);
   const pageSize = 30;
 
-  const LEFT_DOMAINS   = "npr.org,theguardian.com,huffpost.com,politico.com,vox.com,theatlantic.com,cnn.com,msnbc.com";
+  const LEFT_DOMAINS   = "npr.org,theguardian.com,huffpost.com,politico.com,vox.com,theatlantic.com,salon.com,thenation.com,motherjones.com,slate.com,newrepublic.com,rawstory.com,talkingpointsmemo.com,theintercept.com";
   const CENTRE_DOMAINS = "reuters.com,apnews.com,bbc.com,axios.com,thehill.com,bloomberg.com,cbsnews.com,nbcnews.com";
   const RIGHT_DOMAINS  = "foxnews.com,breitbart.com,washingtonexaminer.com,dailywire.com,nationalreview.com,nypost.com,newsmax.com,dailycaller.com";
 
-  async function fetchSide(domains, side) {
+  async function fetchByDomains(domains, side) {
     try {
       const url = `https://newsapi.org/v2/everything?domains=${domains}&from=${from}&sortBy=publishedAt&pageSize=${pageSize}&language=en&apiKey=${NEWS_API_KEY}`;
       const res = await fetch(url);
-      if (!res.ok) { console.log(`  NewsAPI ${side} failed: ${res.status}`); return []; }
+      if (!res.ok) return [];
       const data = await res.json();
-      const articles = (data.articles||[]).filter(a =>
-        a.title && a.url &&
-        !a.title.includes("[Removed]") &&
-        a.source?.name !== "Removed"
-      );
-      console.log(`  NewsAPI ${side}: ${articles.length} headlines`);
-      return articles.map(a => ({
-        title: a.title,
-        url: a.url,
-        source: a.source?.name || "Unknown",
-        publishedAt: a.publishedAt,
-        description: a.description || "",
-        lean: side
-      }));
-    } catch(e) {
-      console.warn(`  NewsAPI ${side} error: ${e.message}`);
-      return [];
-    }
+      return (data.articles||[])
+        .filter(a => a.title && a.url && !a.title.includes("[Removed]"))
+        .map(a => ({ title:a.title, url:a.url, source:a.source?.name||"Unknown",
+                     publishedAt:a.publishedAt, description:a.description||"", lean:side }));
+    } catch(e) { return []; }
   }
 
-  const [leftArticles, centreArticles, rightArticles] = await Promise.all([
-    fetchSide(LEFT_DOMAINS,   "left"),
-    fetchSide(CENTRE_DOMAINS, "centre"),
-    fetchSide(RIGHT_DOMAINS,  "right"),
+  async function fetchTopHeadlines(category, side) {
+    try {
+      const url = `https://newsapi.org/v2/top-headlines?country=us&category=${category}&pageSize=${pageSize}&apiKey=${NEWS_API_KEY}`;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.articles||[])
+        .filter(a => a.title && a.url && !a.title.includes("[Removed]"))
+        .map(a => ({ title:a.title, url:a.url, source:a.source?.name||"Unknown",
+                     publishedAt:a.publishedAt, description:a.description||"", lean:side }));
+    } catch(e) { return []; }
+  }
+
+  // Fetch in parallel — use top-headlines for general pool + domain-specific for balance
+  const [
+    leftDomains, centreDomains, rightDomains,
+    topGeneral, topPolitics
+  ] = await Promise.all([
+    fetchByDomains(LEFT_DOMAINS,   "left"),
+    fetchByDomains(CENTRE_DOMAINS, "centre"),
+    fetchByDomains(RIGHT_DOMAINS,  "right"),
+    fetchTopHeadlines("general",  "centre"),
+    fetchTopHeadlines("politics", "centre"),
   ]);
+
+  // Classify top-headlines by known outlet bias
+  const LEFT_OUTLET_NAMES   = new Set(["NPR","The Guardian","HuffPost","Politico","Vox",
+    "The Atlantic","Salon","The Nation","Mother Jones","Slate","The New Republic",
+    "Raw Story","Talking Points Memo","The Intercept","MSNBC","CNN"]);
+  const RIGHT_OUTLET_NAMES  = new Set(["Fox News","Breitbart","Washington Examiner",
+    "Daily Wire","National Review","Daily Caller","New York Post","Newsmax",
+    "The Blaze","Townhall","The Federalist"]);
+
+  const extraLeft = [], extraRight = [], extraCentre = [];
+  for (const a of [...topGeneral, ...topPolitics]) {
+    const name = a.source || "";
+    if (LEFT_OUTLET_NAMES.has(name))       extraLeft.push({...a, lean:"left"});
+    else if (RIGHT_OUTLET_NAMES.has(name)) extraRight.push({...a, lean:"right"});
+    else                                   extraCentre.push({...a, lean:"centre"});
+  }
+
+  const leftArticles   = [...leftDomains,   ...extraLeft];
+  const centreArticles = [...centreDomains, ...extraCentre];
+  const rightArticles  = [...rightDomains,  ...extraRight];
+
+  console.log(`  Raw: ${leftArticles.length}L ${centreArticles.length}C ${rightArticles.length}R`);
 
   // Deduplicate within each side by title
   function dedupe(articles) {
@@ -308,13 +336,14 @@ async function agentWriter(batch, headlines, excludeTopics=[]) {
     ? "Select the TOP 5 most politically significant stories."
     : "Select the NEXT 5 most politically significant stories. Do NOT repeat any story from batch 1. " +
       (excludeTopics.length > 0 ? "Stories already covered (do NOT select these): " + excludeTopics.join("; ") : "");
-  // Story quality rules added to both batches
+  // Story quality and balance rules
   const qualityRules = `
-STORY SELECTION RULES:
-- Only select stories with genuine political significance — policy, legislation, elections, courts, national security, economy
-- Do NOT select: celebrity news, sports, entertainment, viral memes, social media trends, lifestyle stories
-- Do NOT select stories about Trump social media posts or memes unless they have direct policy implications
-- Prioritise stories that affect millions of Americans or have lasting political consequences`;
+STORY SELECTION RULES — FOLLOW STRICTLY:
+1. BALANCE: Select stories that appear in BOTH left AND right source lists above. Stories only covered by one side are lower priority.
+2. SIGNIFICANCE: Only select stories with national political significance — major policy, legislation, Supreme Court, elections, national security, economy, foreign policy.
+3. AVOID: Celebrity news, sports, entertainment, viral memes, lifestyle, state-level tax proposals, polls framed to favor one side, sensationalist crime stories.
+4. FRAMING: Write every story with neutral framing in the topic headline — never use loaded language from either side.
+5. BALANCE CHECK: Before finalizing your 5 stories, verify at least 3 of them appear in sources from BOTH the left AND right lists. If not, swap out single-sided stories for cross-covered ones.`;
 
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
