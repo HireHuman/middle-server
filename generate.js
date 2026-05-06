@@ -510,49 +510,16 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     return true;
   });
 
-  // Classify by bias — also filter for relevance to this specific story
-  const storyKeywordsSet = new Set(keywords);
+    // Classify by bias — headline must contain 2+ story keywords
   const left = [], centre = [], right = [];
   for (const article of unique) {
     const bias = getOutletBiasFromUrl(article.url);
     if (!bias) continue;
 
-    // Strict relevance check — article must match at least 2 story keywords
-    // OR contain a key proper noun from the story topic
-    const articleTitle = (article.title || "").toLowerCase();
-    const articleDesc  = (article.description || "").toLowerCase();
-    const articleText  = articleTitle + " " + articleDesc;
-
-    const kwMatches = keywords.filter(kw => articleText.includes(kw)).length;
-
-    // Extract meaningful proper nouns from story topic (5+ chars, not common words)
-    const COMMON_WORDS = new Set(["about","after","ahead","against","amid","among","around",
-      "before","behind","between","beyond","court","could","debat","during","every",
-      "first","following","house","inside","into","issue","large","later","leads",
-      "light","major","makes","might","month","moves","never","other","over","parti",
-      "party","plans","policy","polls","press","prior","pushes","raise","react","right",
-      "rules","senat","since","state","still","surge","takes","their","there","these",
-      "those","three","through","under","until","upon","using","watch","where","which",
-      "while","white","within","without","would","years"]);
-
-    const properNouns = story.topic
-      .split(/\s+/)
-      .filter(w => {
-        if (w.length < 5) return false;
-        if (w[0] !== w[0].toUpperCase() || w[0] === w[0].toLowerCase()) return false;
-        const lower = w.toLowerCase().replace(/[^a-z]/g, "");
-        return !COMMON_WORDS.has(lower);
-      })
-      .map(w => w.toLowerCase().replace(/[^a-z]/g, ""));
-
-    const hasProperNoun = properNouns.some(n => n.length >= 5 && articleText.includes(n));
-
-    // Also check if article URL contains the current year (more likely to be relevant)
-    const urlHasYear = (article.url||"").includes("2026") || (article.url||"").includes("2025");
-
-    // Relax year requirement — many valid outlets don't include year in URL path
-    const isRelevant = kwMatches >= 2 || (hasProperNoun && kwMatches >= 1) || (kwMatches >= 1 && urlHasYear);
-    if (!isRelevant) continue;
+    // Strict headline check — Beyonce/sports/lifestyle articles won't have 2 political keywords
+    const headline = (article.title || "").toLowerCase();
+    const headlineMatches = keywords.filter(kw => headline.includes(kw)).length;
+    if (headlineMatches < 2) continue;
 
     const item = {
       outlet: getOutletNameFromUrl(article.url),
@@ -565,7 +532,7 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     if (bias === "right")  right.push(item);
   }
 
-  // Limit to 5 per category, highest relevance first
+    // Limit to 5 per category, highest relevance first
   const result = {
     left:   left.slice(0, 5),
     centre: centre.slice(0, 5),
