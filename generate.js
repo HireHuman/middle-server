@@ -243,7 +243,7 @@ async function fetchTodaysHeadlines() {
   if (NEWS_API_KEY && unique.length > 0) {
     try {
       // Fetch both right AND left leaning outlets that NewsAPI top-headlines misses
-    const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com,theguardian.com,huffpost.com,politico.com,theatlantic.com,vox.com,npr.org&sortBy=publishedAt&pageSize=40&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
+    const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com,theguardian.com,huffpost.com,politico.com,theatlantic.com,vox.com,npr.org,cnn.com,msnbc.com,axios.com,thehill.com&sortBy=publishedAt&pageSize=50&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
       const res = await fetch(rightUrl);
       if (res.ok) {
         const data = await res.json();
@@ -517,15 +517,32 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
 
     const kwMatches = keywords.filter(kw => articleText.includes(kw)).length;
 
-    // Extract proper nouns from story topic (capitalized words 4+ chars)
+    // Extract meaningful proper nouns from story topic (5+ chars, not common words)
+    const COMMON_WORDS = new Set(["about","after","ahead","against","amid","among","around",
+      "before","behind","between","beyond","court","could","debat","during","every",
+      "first","following","house","inside","into","issue","large","later","leads",
+      "light","major","makes","might","month","moves","never","other","over","parti",
+      "party","plans","policy","polls","press","prior","pushes","raise","react","right",
+      "rules","senat","since","state","still","surge","takes","their","there","these",
+      "those","three","through","under","until","upon","using","watch","where","which",
+      "while","white","within","without","would","years"]);
+
     const properNouns = story.topic
       .split(/\s+/)
-      .filter(w => w.length >= 4 && w[0] === w[0].toUpperCase() && w[0] !== w[0].toLowerCase())
+      .filter(w => {
+        if (w.length < 5) return false;
+        if (w[0] !== w[0].toUpperCase() || w[0] === w[0].toLowerCase()) return false;
+        const lower = w.toLowerCase().replace(/[^a-z]/g, "");
+        return !COMMON_WORDS.has(lower);
+      })
       .map(w => w.toLowerCase().replace(/[^a-z]/g, ""));
 
-    const hasProperNoun = properNouns.some(n => n.length > 3 && articleText.includes(n));
+    const hasProperNoun = properNouns.some(n => n.length >= 5 && articleText.includes(n));
 
-    const isRelevant = kwMatches >= 2 || hasProperNoun;
+    // Also check if article URL contains the current year (more likely to be relevant)
+    const urlHasYear = (article.url||"").includes("2026") || (article.url||"").includes("2025");
+
+    const isRelevant = (kwMatches >= 2 && urlHasYear) || (kwMatches >= 3) || (hasProperNoun && kwMatches >= 1 && urlHasYear);
     if (!isRelevant) continue;
 
     const item = {
