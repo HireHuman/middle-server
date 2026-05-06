@@ -199,83 +199,66 @@ async function validateCoverage(newsCoverage) {
 // Uses the /top-headlines endpoint which works on free tier
 // and sources that actually allow NewsAPI access
 async function fetchTodaysHeadlines() {
-  if (!NEWS_API_KEY) { console.log("  No NEWS_API_KEY set"); return []; }
+  if (!NEWS_API_KEY) { console.log("  No NEWS_API_KEY"); return { left:[], centre:[], right:[] }; }
 
-  const headlines = [];
-  // Use just ONE call to save our daily quota — top-headlines is most reliable
-  // and returns the most current important stories
-  try {
-    const url = `https://newsapi.org/v2/top-headlines?country=us&pageSize=100&apiKey=${NEWS_API_KEY}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.log("  NewsAPI failed: " + res.status);
-      return [];
-    }
-    const data = await res.json();
-    const articles = (data.articles||[]).filter(a =>
-      a.title && a.url &&
-      !a.title.includes("[Removed]") &&
-      a.source?.name !== "Removed"
-    );
-    console.log("  NewsAPI: " + articles.length + " headlines fetched");
-    for (const a of articles) {
-      headlines.push({
+  const from = new Date(Date.now() - 86400000).toISOString().slice(0,10);
+  const pageSize = 30;
+
+  const LEFT_DOMAINS   = "npr.org,theguardian.com,huffpost.com,politico.com,vox.com,theatlantic.com,cnn.com,msnbc.com";
+  const CENTRE_DOMAINS = "reuters.com,apnews.com,bbc.com,axios.com,thehill.com,bloomberg.com,cbsnews.com,nbcnews.com";
+  const RIGHT_DOMAINS  = "foxnews.com,breitbart.com,washingtonexaminer.com,dailywire.com,nationalreview.com,nypost.com,newsmax.com,dailycaller.com";
+
+  async function fetchSide(domains, side) {
+    try {
+      const url = `https://newsapi.org/v2/everything?domains=${domains}&from=${from}&sortBy=publishedAt&pageSize=${pageSize}&language=en&apiKey=${NEWS_API_KEY}`;
+      const res = await fetch(url);
+      if (!res.ok) { console.log(`  NewsAPI ${side} failed: ${res.status}`); return []; }
+      const data = await res.json();
+      const articles = (data.articles||[]).filter(a =>
+        a.title && a.url &&
+        !a.title.includes("[Removed]") &&
+        a.source?.name !== "Removed"
+      );
+      console.log(`  NewsAPI ${side}: ${articles.length} headlines`);
+      return articles.map(a => ({
         title: a.title,
         url: a.url,
         source: a.source?.name || "Unknown",
         publishedAt: a.publishedAt,
         description: a.description || "",
-      });
+        lean: side
+      }));
+    } catch(e) {
+      console.warn(`  NewsAPI ${side} error: ${e.message}`);
+      return [];
     }
-  } catch(e) { console.warn("  NewsAPI fetch error: " + e.message); }
-
-  // Deduplicate
-  const seen = new Set();
-  const unique = headlines.filter(h => {
-    const key = h.title.slice(0,40).toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  // Second fetch specifically targeting right-leaning sources
-  // NewsAPI top-headlines skews left — this balances it
-  if (NEWS_API_KEY && unique.length > 0) {
-    try {
-      // Fetch both right AND left leaning outlets that NewsAPI top-headlines misses
-    const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com,theguardian.com,huffpost.com,politico.com,theatlantic.com,vox.com,npr.org,cnn.com,msnbc.com,axios.com,thehill.com&sortBy=publishedAt&pageSize=50&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
-      const res = await fetch(rightUrl);
-      if (res.ok) {
-        const data = await res.json();
-        const arts = (data.articles||[]).filter(a =>
-          a.title && a.url &&
-          !a.title.includes("[Removed]") &&
-          a.source?.name !== "Removed"
-        );
-        console.log("  NewsAPI right sources: " + arts.length + " headlines");
-        let added = 0;
-        for (const a of arts) {
-          const key = a.title.slice(0,40).toLowerCase();
-          if (!seen.has(key)) {
-            seen.add(key);
-            unique.push({
-              title: a.title, url: a.url,
-              source: a.source?.name || "Unknown",
-              publishedAt: a.publishedAt,
-              description: a.description || "",
-              lean: "right"
-            });
-            added++;
-          }
-        }
-        console.log("  Added " + added + " right-leaning headlines");
-      }
-    } catch(e) { console.warn("  Right sources fetch failed: " + e.message); }
   }
 
-  console.log("Total unique headlines: " + unique.length);
-  return unique;
+  const [leftArticles, centreArticles, rightArticles] = await Promise.all([
+    fetchSide(LEFT_DOMAINS,   "left"),
+    fetchSide(CENTRE_DOMAINS, "centre"),
+    fetchSide(RIGHT_DOMAINS,  "right"),
+  ]);
+
+  // Deduplicate within each side by title
+  function dedupe(articles) {
+    const seen = new Set();
+    return articles.filter(a => {
+      const key = a.title.slice(0,40).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  const left   = dedupe(leftArticles);
+  const centre = dedupe(centreArticles);
+  const right  = dedupe(rightArticles);
+
+  console.log(`  Headlines: ${left.length}L ${centre.length}C ${right.length}R`);
+  return { left, centre, right };
 }
+
 
 // ─── Image fetcher ────────────────────────────────────────────────────────────
 async function fetchNewsImage(searchQuery) {
@@ -336,19 +319,34 @@ STORY SELECTION RULES:
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
 
-  if (headlines.length === 0) {
-    console.warn("  WARNING: No headlines available — Agent 1 will use live web search");
-    console.warn("  This may produce less accurate stories. Check NewsAPI quota.");
+  const hasHeadlines = headlines && (headlines.left?.length || headlines.centre?.length || headlines.right?.length);
+  if (!hasHeadlines) {
+    console.warn("  WARNING: No headlines — Agent 1 using live web search");
   }
 
-  // Format headlines for context
-  const headlineText = headlines.length > 0
-    ? "Here are today's REAL verified news headlines. Select stories ONLY from this list:\n\n" +
-      headlines.slice(0, 40).map((h,i) =>
-        `${i+1}. [${h.source}] "${h.title}"`
-      ).join("\n") +
-      "\n\nOnly write stories about events listed above. Do not invent stories."
-    : "No pre-fetched headlines available. Search the web for today's top US political news from the last 24 hours only.";
+  // Format as clearly labelled left/centre/right lists
+  let headlineText = "";
+  if (hasHeadlines) {
+    const fmt = (arr, label) => arr.slice(0,20).map((h,i) =>
+      `  ${i+1}. [${h.source}] "${h.title}"`
+    ).join("\n");
+
+    headlineText = `Here are today's REAL headlines from verified sources. Select stories covered by MULTIPLE outlets ideally from BOTH left and right:
+
+LEFT-LEANING SOURCES:
+${fmt(headlines.left||[], "left")}
+
+CENTRE/NEUTRAL SOURCES:
+${fmt(headlines.centre||[], "centre")}
+
+RIGHT-LEANING SOURCES:
+${fmt(headlines.right||[], "right")}
+
+IMPORTANT: Only write stories about real events shown above. Do not invent stories.
+Prioritise stories that appear in BOTH left and right sources — those are the most newsworthy.`;
+  } else {
+    headlineText = "No pre-fetched headlines. Use your live web search for today's top US political stories.";
+  }
 
   const system = `You are the lead editorial writer for MIDDLE, a nonpartisan news app. You have live web access.
 Today is ${today}.
@@ -484,11 +482,17 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     .split(/\s+/)
     .filter(w => w.length > 3);
 
-  const matched = allHeadlines.filter(h => {
+  // Flatten structured headlines into single array for matching
+  const allHeadlinesList = [
+    ...(allHeadlines.left   || []),
+    ...(allHeadlines.centre || []),
+    ...(allHeadlines.right  || []),
+  ];
+
+  const matched = allHeadlinesList.filter(h => {
     const title = (h.title || "").toLowerCase();
     const desc  = (h.description || "").toLowerCase();
     const combined = title + " " + desc;
-    // Match on ANY keyword — more lenient to catch related coverage
     return keywords.some(kw => combined.includes(kw));
   });
 
@@ -677,7 +681,8 @@ async function main() {
   // Fetch real headlines first
   console.log("\nFetching today's headlines...");
   const headlines = await fetchTodaysHeadlines();
-  console.log("Headlines ready: " + headlines.length + "\n");
+  const totalHL = (headlines.left?.length||0)+(headlines.centre?.length||0)+(headlines.right?.length||0);
+  console.log("Headlines ready: " + totalHL + " (" + (headlines.left?.length||0) + "L " + (headlines.centre?.length||0) + "C " + (headlines.right?.length||0) + "R)\n");
 
   const globalUsedUrls = new Set();
   // Batch 1
