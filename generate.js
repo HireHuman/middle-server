@@ -242,7 +242,8 @@ async function fetchTodaysHeadlines() {
   // NewsAPI top-headlines skews left — this balances it
   if (NEWS_API_KEY && unique.length > 0) {
     try {
-      const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com&sortBy=publishedAt&pageSize=30&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
+      // Fetch both right AND left leaning outlets that NewsAPI top-headlines misses
+    const rightUrl = `https://newsapi.org/v2/everything?domains=foxnews.com,nypost.com,washingtonexaminer.com,dailywire.com,breitbart.com,nationalreview.com,theguardian.com,huffpost.com,politico.com,theatlantic.com,vox.com,npr.org&sortBy=publishedAt&pageSize=40&language=en&from=${new Date(Date.now()-86400000).toISOString().slice(0,10)}&apiKey=${NEWS_API_KEY}`;
       const res = await fetch(rightUrl);
       if (res.ok) {
         const data = await res.json();
@@ -453,7 +454,7 @@ function getOutletNameFromUrl(url) {
   } catch(e) { return "Unknown"; }
 }
 
-async function agentSourceFinder(story, allHeadlines) {
+async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) {
   console.log("  Agent 2 (Sources) for: \"" + story.topic.slice(0,55) + "\"");
   const start = Date.now();
 
@@ -484,6 +485,7 @@ async function agentSourceFinder(story, allHeadlines) {
   const seenUrls = new Set();
   const unique = allArticles.filter(a => {
     if (!a.url || seenUrls.has(a.url)) return false;
+    if (globalUsedUrls.has(a.url)) return false; // skip URLs used in other stories
     seenUrls.add(a.url);
     return true;
   });
@@ -495,13 +497,24 @@ async function agentSourceFinder(story, allHeadlines) {
     const bias = getOutletBiasFromUrl(article.url);
     if (!bias) continue;
 
-    // Extra relevance check — article title must contain at least 1 story keyword
+    // Strict relevance check — article must match at least 2 story keywords
+    // OR contain a key proper noun from the story topic
     const articleTitle = (article.title || "").toLowerCase();
-    const isRelevant = keywords.some(kw => articleTitle.includes(kw));
-    if (!isRelevant && unique.length > 5) {
-      // Only skip if we have plenty of results — don't be too strict
-      continue;
-    }
+    const articleDesc  = (article.description || "").toLowerCase();
+    const articleText  = articleTitle + " " + articleDesc;
+
+    const kwMatches = keywords.filter(kw => articleText.includes(kw)).length;
+
+    // Extract proper nouns from story topic (capitalized words 4+ chars)
+    const properNouns = story.topic
+      .split(/\s+/)
+      .filter(w => w.length >= 4 && w[0] === w[0].toUpperCase() && w[0] !== w[0].toLowerCase())
+      .map(w => w.toLowerCase().replace(/[^a-z]/g, ""));
+
+    const hasProperNoun = properNouns.some(n => n.length > 3 && articleText.includes(n));
+
+    const isRelevant = kwMatches >= 2 || hasProperNoun;
+    if (!isRelevant) continue;
 
     const item = {
       outlet: getOutletNameFromUrl(article.url),
@@ -593,7 +606,7 @@ Only flag genuine errors.`;
 }
 
 // ─── FULL PIPELINE ────────────────────────────────────────────────────────────
-async function processBatch(batchNum, headlines, excludeTopics=[]) {
+async function processBatch(batchNum, headlines, excludeTopics=[], globalUsedUrls=new Set()) {
   const stories = await agentWriter(batchNum, headlines, excludeTopics);
   const processed = [];
 
@@ -601,17 +614,22 @@ async function processBatch(batchNum, headlines, excludeTopics=[]) {
     let story = stories[i];
     console.log("\nProcessing story " + (i+1) + "/" + stories.length + ": \"" + story.topic.slice(0,55) + "\"");
 
-    // Agent 2: Find sources from NewsAPI headlines
-    story.newsCoverage = await agentSourceFinder(story, headlines);
+    // Agent 2: Find sources — pass globalUsedUrls to prevent URL reuse across stories
+    story.newsCoverage = await agentSourceFinder(story, headlines, globalUsedUrls);
     await new Promise(r => setTimeout(r, 1500));
 
     // Agent 3: Verify and fix
     story = await agentVerifier(story);
     await new Promise(r => setTimeout(r, 1000));
 
-    // Validate URLs
+    // Validate URLs and mark them as globally used
     if (story.newsCoverage) {
       story.newsCoverage = await validateCoverage(story.newsCoverage);
+      // Add validated URLs to global set to prevent reuse
+      const c = story.newsCoverage;
+      [...(c.left||[]), ...(c.centre||[]), ...(c.right||[])].forEach(item => {
+        if (item?.url) globalUsedUrls.add(item.url);
+      });
     }
 
     // Image
@@ -656,9 +674,10 @@ async function main() {
   const headlines = await fetchTodaysHeadlines();
   console.log("Headlines ready: " + headlines.length + "\n");
 
+  const globalUsedUrls = new Set();
   // Batch 1
   console.log("=== BATCH 1 ===");
-  const batch1 = await processBatch(1, headlines);
+  const batch1 = await processBatch(1, headlines, [], globalUsedUrls);
   await fsSet("storyCache/" + today, {
     storiesJson: JSON.stringify(batch1),
     generatedAt: new Date().toISOString(),
@@ -669,7 +688,7 @@ async function main() {
   // Batch 2 — exclude batch 1 topics to prevent duplicates
   const batch1Topics = batch1.map(s => s.topic);
   console.log("\n=== BATCH 2 ===");
-  const batch2 = await processBatch(2, headlines, batch1Topics);
+  const batch2 = await processBatch(2, headlines, batch1Topics, globalUsedUrls);
 
   const all = [...batch1, ...batch2];
   await fsSet("storyCache/" + today, {
