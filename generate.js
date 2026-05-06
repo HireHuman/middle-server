@@ -336,11 +336,11 @@ async function agentWriter(batch, headlines, excludeTopics=[]) {
 
   // Format headlines for context
   const headlineText = headlines.length > 0
-    ? "Here are today's REAL verified news headlines published in the last 24 hours. You MUST select stories from this list:\n\n" +
-      headlines.slice(0, 80).map((h,i) =>
-        `${i+1}. [${h.source}] "${h.title}" — ${h.url}`
+    ? "Here are today's REAL verified news headlines. Select stories ONLY from this list:\n\n" +
+      headlines.slice(0, 40).map((h,i) =>
+        `${i+1}. [${h.source}] "${h.title}"`
       ).join("\n") +
-      "\n\nOnly write stories about events listed above. Do not invent stories not in this list."
+      "\n\nOnly write stories about events listed above. Do not invent stories."
     : "No pre-fetched headlines available. Search the web for today's top US political news from the last 24 hours only.";
 
   const system = `You are the lead editorial writer for MIDDLE, a nonpartisan news app. You have live web access.
@@ -391,7 +391,19 @@ For each selected story, write complete editorial content. Return exactly 5 stor
 
 Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b HEALTH=#06b6d4 CULTURE=#ec4899`;
 
-  const text = await callGrok(system, user, 32000);
+  let text = "";
+  let attempt = 0;
+  while (attempt < 2) {
+    try {
+      text = await callGrok(system, user, 24000);
+      break;
+    } catch(e) {
+      attempt++;
+      if (attempt >= 2) throw e;
+      console.warn("Agent 1 attempt " + attempt + " failed: " + e.message + " — retrying...");
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
   const elapsed = ((Date.now()-start)/1000).toFixed(1);
   console.log("Agent 1 done in " + elapsed + "s");
   const stories = parseJSON(text);
