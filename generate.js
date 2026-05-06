@@ -125,7 +125,7 @@ async function callGrok(systemPrompt, userPrompt, maxTokens = 16000) {
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
     req.on("error", reject);
-    req.setTimeout(600000, () => { req.destroy(); reject(new Error("Grok timeout after 10 min")); });
+    req.setTimeout(1200000, () => { req.destroy(); reject(new Error("Grok timeout after 20 min")); });
     req.write(body);
     req.end();
   });
