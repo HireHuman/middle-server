@@ -469,16 +469,31 @@ Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b 
   console.log("Agent 1 done in " + elapsed + "s");
   let stories = parseJSON(text);
 
-  // Validate — must be an array of story objects with required fields
+  // Validate — must be an array of story objects
   if (!Array.isArray(stories)) {
     console.warn("Agent 1 returned non-array — wrapping");
     stories = [stories].filter(Boolean);
   }
 
-  // Filter to only valid story objects and cap at 5
-  stories = stories
-    .filter(s => s && typeof s === "object" && s.topic && s.neutralSummary)
-    .slice(0, 5);
+  // Filter to only valid story objects — just need topic and one summary field
+  const validStories = stories.filter(s =>
+    s && typeof s === "object" && s.topic &&
+    (s.neutralSummary || s.leftSummary || s.rightSummary)
+  );
+
+  // If JSON recovery gave us too many, take the best 5
+  if (validStories.length > 5) {
+    console.log("  Trimming " + validStories.length + " stories to 5");
+    stories = validStories.slice(0, 5);
+  } else {
+    stories = validStories;
+  }
+
+  // If still 0 valid, keep original array and let downstream handle it
+  if (stories.length === 0 && Array.isArray(parseJSON) === false) {
+    console.warn("  No valid stories found after filter — keeping raw");
+    stories = (Array.isArray(stories) ? stories : []).slice(0, 5);
+  }
 
   console.log("Agent 1: " + stories.length + " valid stories");
   return stories;
@@ -587,10 +602,13 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     const bias = getOutletBiasFromUrl(article.url);
     if (!bias) continue;
 
-    // Headline relevance check — must contain at least 1 story keyword
+    // Headline relevance — high-volume outlets need stricter matching
     const headline = (article.title || "").toLowerCase();
     const headlineMatches = keywords.filter(kw => headline.includes(kw)).length;
-    if (headlineMatches < 1) continue;
+    const isHighVolume = ["foxnews.com","nypost.com","breitbart.com","dailycaller.com"]
+      .some(d => (article.url||"").includes(d));
+    const minMatches = isHighVolume ? 2 : 1;
+    if (headlineMatches < minMatches) continue;
 
     const item = {
       outlet: getOutletNameFromUrl(article.url),
@@ -722,12 +740,17 @@ async function processBatch(batchNum, headlines, excludeTopics=[], globalUsedUrl
     const delay = i * 3500;
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
     // Try multiple image queries — short keywords work best
-    const topicWords = story.topic.split(" ").filter(w => w.length > 3 && !["that","this","with","from","over","into","amid","have","been","will","they","them","their","after","about","would"].includes(w.toLowerCase()));
+    const stopWords = new Set(["that","this","with","from","over","into","amid","have",
+      "been","will","they","them","their","after","about","would","also","says",
+      "said","just","more","than","when","what","where","some","could","should"]);
+    const topicWords = story.topic.split(" ")
+      .filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
     const queries = [
       story.searchQuery,
+      topicWords.slice(0,5).join(" "),
       topicWords.slice(0,4).join(" "),
       topicWords.slice(0,3).join(" "),
-    ].filter(Boolean);
+    ].filter((q,i,arr) => q && arr.indexOf(q) === i); // dedupe
     let image = { imageUrl:null, imageCredit:null, imageArticleUrl:null };
     for (const q of queries) {
       image = await fetchNewsImage(q).catch(() => ({ imageUrl:null, imageCredit:null, imageArticleUrl:null }));
