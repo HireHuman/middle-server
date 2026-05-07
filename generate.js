@@ -392,33 +392,40 @@ ${proposed}
 Available headlines for reference:
 ${headlineTitles}
 
-Check each story for:
-1. SIGNIFICANCE: Is this genuinely nationally important? (not minor state issues, not celebrity, not memes)
-2. DIVERSITY: Are topics spread across different areas? (max 1 election story, 1 foreign policy, 1 economy etc)
-3. BALANCE: Can this story be covered fairly from both left AND right perspectives?
-4. FRAMING: Is the topic headline neutral? (no loaded language)
-5. REALITY: Does this story appear in the headlines provided? (no invented stories)
+MIDDLE IS A POLITICAL NEWS APP. All 5 stories must be political. Do NOT replace political stories with health, environment, science, lifestyle, or entertainment topics under any circumstances.
+
+Check ONLY for these specific problems:
+1. NOT NATIONAL: Is this clearly only a local or state-level issue with no national implications? (replace if yes)
+2. INVENTED: Does this story NOT appear in any of the reference headlines? (replace if yes)
+3. DUPLICATE TOPIC: Are 3 or more stories about the exact same event? (replace duplicates if yes)
+4. LOADED FRAMING: Does the headline use partisan language that clearly favors one side? (fix framing only — do not replace the story)
+
+DO NOT replace stories for these wrong reasons:
+- "Too many Trump stories" — Trump IS the news, cover him fairly
+- "Too many politics stories" — this is a politics app
+- "Lacks diversity" — political diversity means different political TOPICS, not different subjects
+- "Better to cover health/environment" — NO, MIDDLE covers politics only
+
+Valid replacement topics must be: major legislation, Supreme Court decisions, elections, foreign policy, economy/trade, national security, major political appointments or scandals.
 
 Return:
 {
   "approved": true,
-  "issues": [],
   "corrections": [
     {
-      "index": 0,
+      "index": 2,
       "action": "replace",
-      "reason": "Too minor — state level issue",
-      "newTopic": "Better story topic",
-      "newSearchQuery": "better keywords",
+      "reason": "Story does not appear in any reference headlines — likely invented",
+      "newTopic": "Topic from the reference headlines above",
+      "newSearchQuery": "keywords from headline",
       "newCategory": "POLITICS",
       "newCategoryColor": "#818cf8"
     }
   ],
-  "directorNote": "Overall assessment"
+  "directorNote": "Brief honest assessment"
 }
 
-If all 5 stories are strong, set approved: true and empty corrections array.
-Only replace stories with genuine issues — do not change things that are fine.`;
+If all stories are legitimate political news, return approved: true with empty corrections. Be conservative — only replace when there is a clear specific problem.`;
 
   try {
     const text = await callGrok(system, user, 3000);
