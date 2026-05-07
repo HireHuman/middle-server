@@ -467,8 +467,20 @@ Category colors: POLITICS=#818cf8 WORLD=#ef4444 ECONOMY=#10b981 JUSTICE=#f59e0b 
   }
   const elapsed = ((Date.now()-start)/1000).toFixed(1);
   console.log("Agent 1 done in " + elapsed + "s");
-  const stories = parseJSON(text);
-  console.log("Agent 1: " + stories.length + " stories written");
+  let stories = parseJSON(text);
+
+  // Validate — must be an array of story objects with required fields
+  if (!Array.isArray(stories)) {
+    console.warn("Agent 1 returned non-array — wrapping");
+    stories = [stories].filter(Boolean);
+  }
+
+  // Filter to only valid story objects and cap at 5
+  stories = stories
+    .filter(s => s && typeof s === "object" && s.topic && s.neutralSummary)
+    .slice(0, 5);
+
+  console.log("Agent 1: " + stories.length + " valid stories");
   return stories;
 }
 
@@ -618,8 +630,14 @@ CRITICAL: The only valid values for "side" are "left" or "right". Never use "neu
 Return ONLY a raw JSON object. No markdown. No commentary.`;
 
   const fcList = (story.factChecks||[])
+    .filter(fc => fc && fc.claim && fc.side && fc.verdict)
     .map((fc,i) => `${i}. [${fc.side}] "${fc.claim}" — ${fc.verdict}`)
     .join('\n');
+
+  if (!fcList) {
+    console.log("    Agent 3: no fact checks to verify");
+    return story;
+  }
 
   const user = `Review these fact checks for the story: "${story.topic}"
 
@@ -676,6 +694,10 @@ async function processBatch(batchNum, headlines, excludeTopics=[], globalUsedUrl
 
   for (let i = 0; i < stories.length; i++) {
     let story = stories[i];
+    if (!story || !story.topic) {
+      console.warn("Skipping invalid story at index " + i);
+      continue;
+    }
     console.log("\nProcessing story " + (i+1) + "/" + stories.length + ": \"" + story.topic.slice(0,55) + "\"");
 
     // Agent 2: Find sources — pass globalUsedUrls to prevent URL reuse across stories
