@@ -519,36 +519,26 @@ async function agentWriterReview(story) {
 
   const system = `You are the Senior Editor of MIDDLE, a nonpartisan news app. Review a written story for balance, accuracy and quality. Return ONLY a raw JSON object.`;
 
-  const user = `Review this story: "${story.topic}"
+  const user = `Review this story for editorial balance: "${story.topic}"
 
-Left summary: "${story.leftSummary}"
-Right summary: "${story.rightSummary}"
-Bird's-Eye conclusion (first 300 chars): "${(story.conclusion||"").slice(0,300)}"
-BlindspotLeft: "${story.blindspotLeft}"
-BlindspotRight: "${story.blindspotRight}"
+Left summary: "${(story.leftSummary||"").slice(0,300)}"
+Right summary: "${(story.rightSummary||"").slice(0,300)}"
 
-Check:
-1. BALANCE: Is leftSummary the STRONGEST honest progressive case? Is rightSummary the STRONGEST honest conservative case? Or are they strawmen?
-2. NEUTRALITY: Does the conclusion favor one side? Does it use loaded language?
-3. BLINDSPOTS: Are the blindspots genuinely what each side is missing, or vague/unfair?
-4. FACT CHECKS: Are the 10 claims real things each side is actually saying?
+ONLY check these two things:
+1. Is leftSummary genuinely the strongest honest progressive argument? (not a strawman)
+2. Is rightSummary genuinely the strongest honest conservative argument? (not a strawman)
 
-Return:
+Return ONLY:
 {
   "approved": true,
   "corrections": {
     "leftSummary": null,
-    "rightSummary": null,
-    "blindspotLeft": null,
-    "blindspotRight": null
+    "rightSummary": null
   },
-  "factCheckFixes": [
-    {"index": 0, "field": "side", "newValue": "left", "reason": "This is a liberal claim not conservative"}
-  ],
-  "editorNote": "Brief assessment"
+  "editorNote": "One sentence assessment"
 }
 
-Only correct genuine problems. If everything is balanced and fair, set approved: true with null corrections.`;
+Set corrections to null if summaries are strong. Only provide replacement text if a summary is genuinely a strawman. Do NOT invent new fields. Do NOT check facts — that is Agent 3's job.`;
 
   try {
     const text = await callGrok(system, user, 3000);
@@ -558,18 +548,12 @@ Only correct genuine problems. If everything is balanced and fair, set approved:
     if (review.editorNote) console.log("    Editor: " + review.editorNote);
 
     const c = review.corrections || {};
-    if (c.leftSummary)   { story.leftSummary   = c.leftSummary;   console.log("    Fixed: leftSummary"); }
-    if (c.rightSummary)  { story.rightSummary  = c.rightSummary;  console.log("    Fixed: rightSummary"); }
-    if (c.blindspotLeft) { story.blindspotLeft = c.blindspotLeft; console.log("    Fixed: blindspotLeft"); }
-    if (c.blindspotRight){ story.blindspotRight= c.blindspotRight;console.log("    Fixed: blindspotRight"); }
-
-    for (const fix of (review.factCheckFixes||[])) {
-      if (typeof fix.index==="number" && fix.index>=0 && fix.index<(story.factChecks||[]).length) {
-        if (fix.field==="side" && !["left","right"].includes(fix.newValue)) continue;
-        const old = story.factChecks[fix.index][fix.field];
-        story.factChecks[fix.index][fix.field] = fix.newValue;
-        console.log("    Fixed factCheck["+fix.index+"] "+fix.field+": "+old+" → "+fix.newValue);
-      }
+    // Only apply corrections to known valid story fields
+    if (c.leftSummary  && typeof c.leftSummary  === "string" && c.leftSummary.length  > 50) {
+      story.leftSummary  = c.leftSummary;  console.log("    Fixed: leftSummary");
+    }
+    if (c.rightSummary && typeof c.rightSummary === "string" && c.rightSummary.length > 50) {
+      story.rightSummary = c.rightSummary; console.log("    Fixed: rightSummary");
     }
     return story;
   } catch(e) {
@@ -874,7 +858,7 @@ async function agentQualityGate(story) {
 
   const system = `You are the Quality Controller for MIDDLE, a nonpartisan news app. You have final authority to approve or reject stories. Return ONLY a raw JSON object.`;
 
-  const user = `Final quality check for: "${story.topic}"
+  const user = `Today is ${new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}. Final quality check for: "${story.topic}"
 
 Story stats:
 - Sources: ${srcCount} (${story.newsCoverage?.left?.length||0}L ${story.newsCoverage?.centre?.length||0}C ${story.newsCoverage?.right?.length||0}R)
@@ -889,16 +873,23 @@ Neutral summary preview: "${(story.neutralSummary||"").slice(0,200)}"
 Left summary preview: "${(story.leftSummary||"").slice(0,150)}"
 Right summary preview: "${(story.rightSummary||"").slice(0,150)}"
 
-Approve if:
-- Story has genuine national significance
-- Both left and right summaries are present and substantive
-- Conclusion exists and is balanced
-- At least 1 verified source OR story is clearly newsworthy
+We are in the year 2026. Stories about 2026 events are current and real.
 
-Reject if:
-- Story is trivial, celebrity, sports, or clearly not national news
-- Left or right summary is missing or a strawman
-- Story appears to be invented (not a real current event)
+Approve if:
+- Story has genuine national political significance
+- Both left and right summaries are present
+- At least 1 verified source exists
+
+Reject ONLY if:
+- Story is clearly celebrity, sports, or non-political lifestyle content
+- Both left AND right summaries are completely missing
+- Story is clearly fictional with no basis in reality (e.g. fictional characters, impossible events)
+
+DO NOT reject for:
+- Having only 1 source (sources are supplementary)
+- Mentioning 2025 or 2026 dates (we are in 2026)
+- Being critical of any political figure (that is normal news)
+- Uncertainty about minor details
 
 Return:
 {
