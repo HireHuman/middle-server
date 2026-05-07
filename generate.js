@@ -357,23 +357,48 @@ STORY SELECTION RULES — FOLLOW STRICTLY:
   // Format as clearly labelled left/centre/right lists
   let headlineText = "";
   if (hasHeadlines) {
-    const fmt = (arr, label) => arr.slice(0,20).map((h,i) =>
-      `  ${i+1}. [${h.source}] "${h.title}"`
+    // Smart selection — find cross-covered stories first
+    // A story is "cross-covered" if similar keywords appear in both left and right
+    function getKeywords(title) {
+      return title.toLowerCase().split(/\s+/)
+        .filter(w => w.length > 4)
+        .map(w => w.replace(/[^a-z]/g, ""));
+    }
+
+    function scoreCoverage(headline, otherSideArr) {
+      const kws = getKeywords(headline.title);
+      return otherSideArr.filter(h =>
+        kws.some(kw => h.title.toLowerCase().includes(kw))
+      ).length;
+    }
+
+    // Score each left headline by how many right headlines cover same topic
+    const leftScored  = (headlines.left||[]).map(h => ({
+      ...h, score: scoreCoverage(h, headlines.right||[])
+    })).sort((a,b) => b.score - a.score);
+
+    const rightScored = (headlines.right||[]).map(h => ({
+      ...h, score: scoreCoverage(h, headlines.left||[])
+    })).sort((a,b) => b.score - a.score);
+
+    const fmt = (arr) => arr.slice(0,10).map((h,i) =>
+      `  ${i+1}. [${h.source}${h.score > 0 ? " ★" : ""}] "${h.title}"`
     ).join("\n");
 
-    headlineText = `Here are today's REAL headlines from verified sources. Select stories covered by MULTIPLE outlets ideally from BOTH left and right:
+    const centreTop = (headlines.centre||[]).slice(0,10);
+
+    headlineText = `Here are today's REAL headlines. Stories marked ★ appear on BOTH left and right — prioritise these.
 
 LEFT-LEANING SOURCES:
-${fmt(headlines.left||[], "left")}
+${fmt(leftScored)}
 
 CENTRE/NEUTRAL SOURCES:
-${fmt(headlines.centre||[], "centre")}
+${centreTop.map((h,i) => `  ${i+1}. [${h.source}] "${h.title}"`).join("\n")}
 
 RIGHT-LEANING SOURCES:
-${fmt(headlines.right||[], "right")}
+${fmt(rightScored)}
 
-IMPORTANT: Only write stories about real events shown above. Do not invent stories.
-Prioritise stories that appear in BOTH left and right sources — those are the most newsworthy.`;
+RULES: Only write stories about events listed above. Prioritise ★ stories. Do not invent stories.`;
   } else {
     headlineText = "No pre-fetched headlines. Use your live web search for today's top US political stories.";
   }
