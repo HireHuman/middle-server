@@ -343,7 +343,8 @@ STORY SELECTION RULES — FOLLOW STRICTLY:
 2. SIGNIFICANCE: Only select stories with national political significance — major policy, legislation, Supreme Court, elections, national security, economy, foreign policy.
 3. AVOID: Celebrity news, sports, entertainment, viral memes, lifestyle, state-level tax proposals, polls framed to favor one side, sensationalist crime stories.
 4. FRAMING: Write every story with neutral framing in the topic headline — never use loaded language from either side.
-5. BALANCE CHECK: Before finalizing your 5 stories, verify at least 3 of them appear in sources from BOTH the left AND right lists. If not, swap out single-sided stories for cross-covered ones.`;
+5. BALANCE CHECK: Before finalizing your 5 stories, verify at least 3 of them appear in sources from BOTH the left AND right lists. If not, swap out single-sided stories for cross-covered ones.
+6. DIVERSITY: Select stories across DIFFERENT topics. Do not select more than 1 story about the same event or election. Cover a range of: foreign policy, economy, courts, elections, legislation, social issues.`;
 
   console.log("\nAgent 1 (Writer) — batch " + batch + "...");
   const start = Date.now();
@@ -549,10 +550,10 @@ async function agentSourceFinder(story, allHeadlines, globalUsedUrls=new Set()) 
     const bias = getOutletBiasFromUrl(article.url);
     if (!bias) continue;
 
-    // Strict headline check — Beyonce/sports/lifestyle articles won't have 2 political keywords
+    // Headline relevance check — must contain at least 1 story keyword
     const headline = (article.title || "").toLowerCase();
     const headlineMatches = keywords.filter(kw => headline.includes(kw)).length;
-    if (headlineMatches < 2) continue;
+    if (headlineMatches < 1) continue;
 
     const item = {
       outlet: getOutletNameFromUrl(article.url),
