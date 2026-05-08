@@ -224,7 +224,7 @@ const TRUSTED_DOMAINS = [
   "thehill.com","newrepublic.com","salon.com","slate.com","vox.com",
   "motherjones.com","thenation.com","theintercept.com","rawstory.com",
   "talkingpointsmemo.com","reuters.com","apnews.com","bbc.com","bbc.co.uk",
-  "npr.org","theguardian.com","huffpost.com","cbsnews.com","nbcnews.com",
+  "npr.org","theguardian.com","huffpost.com","cbsnews.com","nbcnews.com","cnn.com","msnbc.com",
   "abcnews.go.com","usatoday.com","time.com","newsweek.com",
 ];
 
@@ -713,11 +713,14 @@ async function agentSourceAndRedditFinder(story) {
 Search queries to use:
 - "${story.searchQuery} ${year}"
 - "${story.topic} news ${year}"
+- site:foxnews.com "${story.searchQuery}"
+- site:breitbart.com OR site:dailywire.com "${story.searchQuery}"
+- site:npr.org OR site:theguardian.com "${story.searchQuery}"
 
 Find and list real articles from these outlets if they covered this story:
-Left-leaning: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, Salon, Mother Jones, New Republic, CNN
-Centre/Neutral: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today
-Right-leaning: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
+Left-leaning: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, Salon, Mother Jones, New Republic, CNN, MSNBC
+Centre/Neutral: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today, Newsweek
+Right-leaning: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax, The Federalist
 
 For each article you find, list:
 OUTLET: [name]
@@ -777,6 +780,15 @@ Only list articles you actually found in search results. Do not invent URLs.`;
       }
     }
 
+    // Deduplicate — same URL shouldn't appear in multiple bias categories
+    const seenNewsUrls = new Set();
+    for (const side of ["left","centre","right"]) {
+      newsCoverage[side] = newsCoverage[side].filter(item => {
+        if (seenNewsUrls.has(item.url)) return false;
+        seenNewsUrls.add(item.url);
+        return true;
+      });
+    }
     const newsTotal = newsCoverage.left.length + newsCoverage.centre.length + newsCoverage.right.length;
     console.log(`    News sources: ${newsTotal} (${newsCoverage.left.length}L ${newsCoverage.centre.length}C ${newsCoverage.right.length}R)`);
   } catch(e) {
