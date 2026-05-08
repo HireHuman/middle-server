@@ -425,7 +425,12 @@ ${fmt(rightScored)}
 IMPORTANT: Only select stories that appear in the headlines above.`
     : `No pre-fetched headlines available today (NewsAPI rate limit reached).
 Use your knowledge of today's major US political news to select 5 real current stories.
-Only select stories you are confident are real and happening right now.`;
+
+IMPORTANT CONTEXT: Today is ${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}. We are in ${new Date().getFullYear()}.
+- Donald Trump is the current US President (began second term January 2025)
+- The current Congress is the 119th Congress
+- Only select stories that are actually happening RIGHT NOW in ${new Date().getFullYear()}
+- Do NOT select stories from Biden's presidency or other outdated events`;
 
   const system = `You are the senior news editor for MIDDLE, a nonpartisan US political news app.
 Select the 5 most nationally significant political stories of the day.
@@ -668,120 +673,191 @@ Set to null if the summary is strong. Do NOT check facts — that is Agent 3's j
 
 // ─── AGENT 2: SOURCE FINDER + REDDIT (live web search) ───────────────────────
 // Grok 4.3 Responses API with web_search tool
-// TWO searches in one call:
-// 1. News outlets — finds real article URLs from left/centre/right media
-// 2. Reddit — finds top posts from left-leaning AND right-leaning subreddits
-// Returns newsCoverage (outlets) AND leftPosts/rightPosts (Reddit) in one call
+// Key insight: Grok won't search AND return JSON simultaneously
+// Solution: Let Grok search and respond naturally, then parse URLs from the text
+// Two separate calls: one for news outlets, one for Reddit
 async function agentSourceAndRedditFinder(story) {
   console.log(`  Agent 2 (Sources + Reddit — live web search)...`);
   const start = Date.now();
   const today = new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
   const year  = new Date().getFullYear();
 
-  const system = `You are a research specialist for MIDDLE news app.
-Search the web RIGHT NOW to find:
-1. Real news articles from across the political spectrum covering this story
-2. Real Reddit posts from both left-leaning and right-leaning subreddits about this story
-
-Return ONLY a raw JSON object. Never invent URLs. Only return URLs you actually found in search results.`;
-
-  const user = `Today is ${today}. Search the web for content about:
-"${story.topic}" (search terms: "${story.searchQuery}")
-
-SEARCH 1 — NEWS OUTLETS:
-Search: "${story.searchQuery} ${year}" and "${story.topic} news"
-Find articles published in the last 48 hours from:
-- LEFT: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, Salon, Mother Jones, New Republic, CNN, MSNBC
-- CENTRE: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today, Newsweek
-- RIGHT: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
-
-SEARCH 2 — REDDIT POSTS:
-Search: "site:reddit.com ${story.searchQuery}" and "site:reddit.com/r/politics ${story.searchQuery}" and "site:reddit.com/r/conservative ${story.searchQuery}"
-
-Find the most upvoted real Reddit posts about this story from:
-- LEFT subreddits: r/politics, r/news, r/worldnews, r/progressive, r/democrats, r/Liberal
-- RIGHT subreddits: r/conservative, r/Republican, r/AskConservatives, r/Libertarian
-
-STRICT RULES:
-- Every URL must be copied EXACTLY from your search results — never construct or guess URLs
-- News articles must be from ${year} only
-- Reddit URLs must be real post permalinks in format: reddit.com/r/SUBREDDIT/comments/POSTID/slug/
-- Never include reddit.com/r/subreddit/search URLs — only actual posts with /comments/ in the URL
-- If you cannot find a real URL, omit that item entirely
-- Quality over quantity — 3 real verified results beats 10 invented ones
-
-Return this JSON:
-{
-  "newsCoverage": {
-    "left": [
-      {"outlet":"NPR","url":"https://npr.org/EXACT-URL","headline":"Exact headline","bias":"left"}
-    ],
-    "centre": [
-      {"outlet":"Reuters","url":"https://reuters.com/EXACT-URL","headline":"Exact headline","bias":"centre"}
-    ],
-    "right": [
-      {"outlet":"Fox News","url":"https://foxnews.com/EXACT-URL","headline":"Exact headline","bias":"right"}
-    ]
-  },
-  "leftPosts": [
-    {
-      "id": "l1",
-      "handle": "r/politics",
-      "source": "Reddit",
-      "avatar": "P",
-      "text": "Exact title of the real Reddit post you found",
-      "likes": 12400,
-      "reposts": 843,
-      "url": "https://www.reddit.com/r/politics/comments/REALID/real_slug/",
-      "thread": []
-    }
-  ],
-  "rightPosts": [
-    {
-      "id": "r1",
-      "handle": "r/conservative",
-      "source": "Reddit",
-      "avatar": "C",
-      "text": "Exact title of the real Reddit post you found",
-      "likes": 8200,
-      "reposts": 421,
-      "url": "https://www.reddit.com/r/conservative/comments/REALID/real_slug/",
-      "thread": []
-    }
-  ]
-}`;
-
-  try {
-    const text = await callGrok43Search(system, user, 8000);
-    const elapsed = ((Date.now()-start)/1000).toFixed(1);
-    console.log(`    Agent 2 search done in ${elapsed}s (${text.length} chars)`);
-
-    if (text.length < 20) {
-      console.warn("    Agent 2 returned empty response");
-      return { newsCoverage:{left:[],centre:[],right:[]}, leftPosts:[], rightPosts:[] };
-    }
-
-    const result = parseJSON(text);
-
-    // Validate Reddit post URLs — must contain /comments/ to be a real post
-    const filterRedditPosts = posts => (Array.isArray(posts)?posts:[])
-      .filter(p => p && p.url && p.url.includes("/comments/") && p.text)
-      .map((p,i,arr) => ({ ...p, id: p.id || `${arr===result.leftPosts?"l":"r"}${i+1}` }));
-
-    const leftPosts  = filterRedditPosts(result.leftPosts);
-    const rightPosts = filterRedditPosts(result.rightPosts);
-
-    const coverage = result.newsCoverage || { left:[], centre:[], right:[] };
-    const newsTotal = (coverage.left?.length||0)+(coverage.centre?.length||0)+(coverage.right?.length||0);
-
-    console.log(`    News sources: ${newsTotal} (${coverage.left?.length||0}L ${coverage.centre?.length||0}C ${coverage.right?.length||0}R)`);
-    console.log(`    Reddit posts: ${leftPosts.length} left, ${rightPosts.length} right`);
-
-    return { newsCoverage: coverage, leftPosts, rightPosts };
-  } catch(e) {
-    console.warn(`    Agent 2 failed: ${e.message}`);
-    return { newsCoverage:{left:[],centre:[],right:[]}, leftPosts:[], rightPosts:[] };
+  // Helper: extract URLs from natural language text response
+  function extractUrls(text) {
+    const urlRegex = /https?:\/\/[^\s\)\],"']+/g;
+    return (text.match(urlRegex)||[])
+      .map(u => u.replace(/[.,;:!?]+$/, "")) // trim trailing punctuation
+      .filter(u => u.length > 20);
   }
+
+  // Helper: classify a URL by outlet bias
+  function classifyNewsUrl(url, title) {
+    const bias = getOutletBias(url);
+    if (!bias) return null;
+    return {
+      outlet: getOutletName(url),
+      url,
+      headline: title || url,
+      bias
+    };
+  }
+
+  // ── Search 1: News outlets ──────────────────────────────────────────────────
+  let newsCoverage = { left:[], centre:[], right:[] };
+  try {
+    const newsSystem = `You are a research assistant. Search the web RIGHT NOW for real news articles about a specific story. List the articles you find with their URLs and headlines. Be specific and factual.`;
+
+    const newsUser = `Today is ${today}. Search for news articles published in the last 48 hours about:
+"${story.topic}"
+
+Search queries to use:
+- "${story.searchQuery} ${year}"
+- "${story.topic} news ${year}"
+
+Find and list real articles from these outlets if they covered this story:
+Left-leaning: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, Salon, Mother Jones, New Republic, CNN
+Centre/Neutral: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today
+Right-leaning: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
+
+For each article you find, list:
+OUTLET: [name]
+URL: [full URL]
+HEADLINE: [exact article headline]
+BIAS: [left/centre/right]
+
+Only list articles you actually found in search results. Do not invent URLs.`;
+
+    const newsText = await callGrok43Search(newsSystem, newsUser, 4000);
+    const newsElapsed = ((Date.now()-start)/1000).toFixed(1);
+    console.log(`    News search done in ${newsElapsed}s (${newsText.length} chars)`);
+
+    if (newsText.length > 50) {
+      // Parse structured outlet/url/headline blocks from text
+      const blocks = newsText.split(/\n(?=OUTLET:|outlet:)/gi);
+      for (const block of blocks) {
+        const outletMatch = block.match(/OUTLET:\s*(.+)/i);
+        const urlMatch    = block.match(/URL:\s*(https?:\/\/\S+)/i);
+        const headlineMatch = block.match(/HEADLINE:\s*(.+)/i);
+        const biasMatch   = block.match(/BIAS:\s*(left|centre|center|right)/i);
+
+        if (urlMatch && outletMatch) {
+          const url = urlMatch[1].trim().replace(/[.,;]+$/, "");
+          const bias = biasMatch
+            ? (biasMatch[1].toLowerCase() === "center" ? "centre" : biasMatch[1].toLowerCase())
+            : getOutletBias(url);
+          if (!bias) continue;
+
+          const item = {
+            outlet: outletMatch[1].trim(),
+            url,
+            headline: headlineMatch ? headlineMatch[1].trim() : outletMatch[1].trim(),
+            bias
+          };
+
+          if (bias === "left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
+          if (bias === "centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
+          if (bias === "right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
+        }
+      }
+
+      // If structured parsing found nothing, try extracting raw URLs
+      if (!newsCoverage.left.length && !newsCoverage.centre.length && !newsCoverage.right.length) {
+        const urls = extractUrls(newsText);
+        for (const url of urls) {
+          const bias = getOutletBias(url);
+          if (!bias) continue;
+          const item = { outlet:getOutletName(url), url, headline:url, bias };
+          if (bias === "left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
+          if (bias === "centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
+          if (bias === "right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
+        }
+      }
+    }
+
+    const newsTotal = newsCoverage.left.length + newsCoverage.centre.length + newsCoverage.right.length;
+    console.log(`    News sources: ${newsTotal} (${newsCoverage.left.length}L ${newsCoverage.centre.length}C ${newsCoverage.right.length}R)`);
+  } catch(e) {
+    console.warn(`    News search failed: ${e.message}`);
+  }
+
+  await new Promise(r=>setTimeout(r,1000));
+
+  // ── Search 2: Reddit posts ──────────────────────────────────────────────────
+  let leftPosts = [], rightPosts = [];
+  try {
+    const redditSystem = `You are a research assistant. Search Reddit RIGHT NOW for real posts about a specific news story. List the posts you find with their exact URLs, titles, and vote counts.`;
+
+    const redditUser = `Today is ${today}. Search Reddit for posts about:
+"${story.topic}"
+
+Search queries to use:
+- site:reddit.com "${story.searchQuery}"
+- site:reddit.com/r/politics "${story.searchQuery}"
+- site:reddit.com/r/conservative "${story.searchQuery}"
+- site:reddit.com/r/news "${story.searchQuery}"
+
+Find real posts from:
+LEFT subreddits: r/politics, r/news, r/worldnews, r/progressive, r/democrats, r/Liberal
+RIGHT subreddits: r/conservative, r/Republican, r/AskConservatives, r/Libertarian
+
+For each post you find, list:
+SUBREDDIT: [r/subreddit]
+URL: [full permalink URL - must contain /comments/]
+TITLE: [exact post title]
+UPVOTES: [upvote count if available]
+SIDE: [left/right based on subreddit]
+
+Only list posts with real /comments/ URLs. Do not invent posts or URLs.`;
+
+    const redditText = await callGrok43Search(redditSystem, redditUser, 3000);
+    const redditElapsed = ((Date.now()-start)/1000).toFixed(1);
+    console.log(`    Reddit search done in ${redditElapsed}s (${redditText.length} chars)`);
+
+    if (redditText.length > 50) {
+      const blocks = redditText.split(/\n(?=SUBREDDIT:|subreddit:)/gi);
+      let leftIdx = 0, rightIdx = 0;
+
+      for (const block of blocks) {
+        const subMatch   = block.match(/SUBREDDIT:\s*(r\/\w+)/i);
+        const urlMatch   = block.match(/URL:\s*(https?:\/\/\S+)/i);
+        const titleMatch = block.match(/TITLE:\s*(.+)/i);
+        const upvMatch   = block.match(/UPVOTES?:\s*([\d,]+)/i);
+        const sideMatch  = block.match(/SIDE:\s*(left|right)/i);
+
+        if (!urlMatch || !titleMatch) continue;
+        const url = urlMatch[1].trim().replace(/[.,;]+$/, "");
+        if (!url.includes("/comments/")) continue; // must be a real post
+
+        const upvotes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
+        const sub = subMatch ? subMatch[1].trim() : "";
+        const side = sideMatch ? sideMatch[1].toLowerCase() :
+          (sub.match(/politics|news|worldnews|progressive|democrats|liberal/i) ? "left" : "right");
+
+        const post = {
+          id: side === "left" ? `l${++leftIdx}` : `r${++rightIdx}`,
+          handle: sub || "r/reddit",
+          source: "Reddit",
+          avatar: (sub.replace("r/","")[0]||"R").toUpperCase(),
+          text: titleMatch[1].trim(),
+          likes: upvotes,
+          reposts: 0,
+          url,
+          thread: []
+        };
+
+        if (side === "left"  && leftPosts.length  < 5) leftPosts.push(post);
+        if (side === "right" && rightPosts.length < 5) rightPosts.push(post);
+      }
+    }
+
+    console.log(`    Reddit posts: ${leftPosts.length} left, ${rightPosts.length} right`);
+  } catch(e) {
+    console.warn(`    Reddit search failed: ${e.message}`);
+  }
+
+  const elapsed = ((Date.now()-start)/1000).toFixed(1);
+  console.log(`    Agent 2 total: ${elapsed}s`);
+  return { newsCoverage, leftPosts, rightPosts };
 }
 
 // ─── AGENT 2 FALLBACK: NEWSAPI HEADLINE MATCHER ───────────────────────────────
