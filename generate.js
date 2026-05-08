@@ -454,6 +454,10 @@ const TRUSTED_DOMAINS = [
   "dailycaller.com","newsmax.com","washingtonexaminer.com","nypost.com",
   "thehill.com","newrepublic.com","salon.com","slate.com","vox.com",
   "motherjones.com","thenation.com","theintercept.com",
+  "reuters.com","apnews.com","bbc.com","bbc.co.uk","npr.org",
+  "theguardian.com","huffpost.com","cbsnews.com","nbcnews.com",
+  "abcnews.go.com","usatoday.com","time.com","newsweek.com",
+  "rawstory.com","talkingpointsmemo.com","theintercept.com",
 ];
 
 function getOutletBias(url) {
