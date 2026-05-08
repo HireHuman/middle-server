@@ -136,12 +136,12 @@ async function callGrok43(systemPrompt, userPrompt, maxTokens=8000) {
 }
 
 // ─── Grok 4.3 — Responses API (with live web search tool) ────────────────────
-async function callGrok43Search(systemPrompt, userPrompt, maxTokens=6000) {
+async function callGrok43Search(systemPrompt, userPrompt, maxTokens=6000, tools=[{type:"web_search"}]) {
   const { default: https } = await import('https');
   const body = JSON.stringify({
     model: "grok-4.3",
     max_tokens: maxTokens,
-    tools: [{ type: "web_search" }],
+    tools: tools,
     input: [
       { role: "system", content: systemPrompt },
       { role: "user",   content: userPrompt   },
@@ -671,141 +671,204 @@ Set to null if the summary is strong. Do NOT check facts — that is Agent 3's j
   }
 }
 
-// ─── AGENT 2: SOURCE FINDER + REDDIT (live web search) ───────────────────────
-// Grok 4.3 Responses API with web_search tool
-// Key insight: Grok won't search AND return JSON simultaneously
-// Solution: Let Grok search and respond naturally, then parse URLs from the text
-// Two separate calls: one for news outlets, one for Reddit
+// ─── AGENT 2: SOURCE FINDER + REDDIT + X SOCIAL (live web search) ──────────
+// THREE parallel searches using Grok 4.3 Responses API:
+// 1. web_search  — news outlet articles from left/centre/right
+// 2. x_search    — X posts from political accounts (last 24h)
+// 3. web_search  — Reddit /comments/ posts from left/right subreddits
+// All run concurrently to minimize total time
 async function agentSourceAndRedditFinder(story) {
-  console.log(`  Agent 2 (Sources + Reddit — live web search)...`);
+  console.log(`  Agent 2 (News + X + Reddit — 3 parallel searches)...`);
   const start = Date.now();
   const today = new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
   const year  = new Date().getFullYear();
+  const from  = new Date(Date.now()-48*60*60*1000).toISOString().slice(0,10);
 
-  // Helper: extract URLs from natural language text response
+  // Helper: extract URLs from natural language response
   function extractUrls(text) {
-    const urlRegex = /https?:\/\/[^\s\)\],"']+/g;
-    return (text.match(urlRegex)||[])
-      .map(u => u.replace(/[.,;:!?]+$/, "")) // trim trailing punctuation
-      .filter(u => u.length > 20);
+    return (text.match(/https?:\/\/[^\s)\],"'<>]+/g)||[])
+      .map(u=>u.replace(/[.,;:!?)]+$/,""))
+      .filter(u=>u.length>20);
   }
 
-  // Helper: classify a URL by outlet bias
-  function classifyNewsUrl(url, title) {
-    const bias = getOutletBias(url);
-    if (!bias) return null;
-    return {
-      outlet: getOutletName(url),
-      url,
-      headline: title || url,
-      bias
-    };
-  }
+  // ── SEARCH 1: News outlets (web_search) ────────────────────────────────────
+  async function searchNews() {
+    const system = `You are a research assistant for MIDDLE news app. Search the web for real news articles published in the last 48 hours about the given story. List each article with its outlet name, URL, and headline. Be specific and factual — only list articles you actually found.`;
+    const user = `Today is ${today}. Search for news articles about:
+"${story.topic}" (keywords: "${story.searchQuery}")
 
-  // ── Search 1: News outlets ──────────────────────────────────────────────────
-  let newsCoverage = { left:[], centre:[], right:[] };
-  try {
-    const newsSystem = `You are a research assistant. Search the web RIGHT NOW for real news articles about a specific story. List the articles you find with their URLs and headlines. Be specific and factual.`;
-
-    const newsUser = `Today is ${today}. Search for news articles published in the last 48 hours about:
-"${story.topic}"
-
-Search queries to use:
+Search queries:
 - "${story.searchQuery} ${year}"
-- "${story.topic} news ${year}"
+- "${story.topic} news today"
 - site:foxnews.com "${story.searchQuery}"
-- site:breitbart.com OR site:dailywire.com "${story.searchQuery}"
-- site:npr.org OR site:theguardian.com "${story.searchQuery}"
+- site:npr.org OR site:cnn.com "${story.searchQuery}"
+- site:reuters.com OR site:apnews.com "${story.searchQuery}"
 
-Find and list real articles from these outlets if they covered this story:
-Left-leaning: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, Salon, Mother Jones, New Republic, CNN, MSNBC
-Centre/Neutral: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today, Newsweek
-Right-leaning: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax, The Federalist
-
-For each article you find, list:
+For each article found, list:
 OUTLET: [name]
 URL: [full URL]
-HEADLINE: [exact article headline]
+HEADLINE: [exact headline]
 BIAS: [left/centre/right]
 
-Only list articles you actually found in search results. Do not invent URLs.`;
+Only articles from ${year}. Do not invent URLs.`;
 
-    const newsText = await callGrok43Search(newsSystem, newsUser, 4000);
-    const newsElapsed = ((Date.now()-start)/1000).toFixed(1);
-    console.log(`    News search done in ${newsElapsed}s (${newsText.length} chars)`);
+    try {
+      const text = await callGrok43Search(system, user, 4000, [{type:"web_search"}]);
+      const result = {left:[],centre:[],right:[]};
+      if (text.length < 20) return result;
 
-    if (newsText.length > 50) {
-      console.log(`    News text preview: ${newsText.slice(0,150).replace(/\n/g," ")}`);
-
-      // Strategy 1: Extract ALL URLs from the text and classify by outlet bias
-      // This works regardless of what format Grok uses
-      const allUrls = extractUrls(newsText);
-      console.log(`    URLs found in text: ${allUrls.length}`);
-
-      for (const url of allUrls) {
+      // Extract all URLs and classify
+      const urls = extractUrls(text);
+      for (const url of urls) {
         const bias = getOutletBias(url);
         if (!bias) continue;
+        const urlIdx = text.indexOf(url);
+        const surrounding = text.slice(Math.max(0,urlIdx-300),urlIdx+200);
+        const titleMatch = surrounding.match(/HEADLINE:\s*(.{10,120})/i) ||
+                          surrounding.match(/[\u201c\u201d]([^\u201c\u201d]{10,100})[\u201c\u201d]/);
 
-        // Find the headline near this URL in the text
-        const urlIdx = newsText.indexOf(url);
-        const surrounding = newsText.slice(Math.max(0,urlIdx-200), urlIdx+200);
-        // Look for a quoted title or text before/after the URL
-        const titleMatch = surrounding.match(/[""]([^"""]{10,100})[""]/) ||
-                           surrounding.match(/headline[:\s]+([^\n]{10,100})/i) ||
-                           surrounding.match(/title[:\s]+([^\n]{10,100})/i);
-        const headline = titleMatch ? titleMatch[1].trim() : getOutletName(url);
-
-        const item = { outlet:getOutletName(url), url, headline, bias };
-        if (bias==="left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
-        if (bias==="centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
-        if (bias==="right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
+        const item = {
+          outlet: getOutletName(url),
+          url,
+          headline: titleMatch ? titleMatch[1].trim() : getOutletName(url),
+          bias
+        };
+        if (bias==="left"  &&result.left.length  <6) result.left.push(item);
+        if (bias==="centre"&&result.centre.length <6) result.centre.push(item);
+        if (bias==="right" &&result.right.length  <6) result.right.push(item);
       }
 
-      // Strategy 2: If few URLs found, try structured block parsing as backup
-      if (allUrls.length < 3) {
-        const blocks = newsText.split(/\n\n+/);
-        for (const block of blocks) {
-          const urlMatch = block.match(/https?:\/\/\S+/);
-          if (!urlMatch) continue;
-          const url = urlMatch[0].replace(/[.,;)]+$/, "");
-          const bias = getOutletBias(url);
-          if (!bias) continue;
-          const outletMatch = block.match(/\b(NPR|CNN|BBC|Reuters|AP|Fox News|Breitbart|Politico|Guardian|HuffPost|Axios|Hill|Bloomberg|NBC|CBS|ABC|Vox|Atlantic|Salon|Slate|MSNBC|Examiner|Daily Wire|National Review|Daily Caller|Newsmax|New York Post|New Republic|Mother Jones)\b/i);
-          const outlet = outletMatch ? outletMatch[1] : getOutletName(url);
-          const item = { outlet, url, headline:outlet, bias };
-          if (bias==="left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
-          if (bias==="centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
-          if (bias==="right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
-        }
+      // Dedup
+      const seen = new Set();
+      for (const side of ["left","centre","right"]) {
+        result[side] = result[side].filter(i=>{
+          if (seen.has(i.url)) return false;
+          seen.add(i.url); return true;
+        });
       }
-    }
 
-    // Deduplicate — same URL shouldn't appear in multiple bias categories
-    const seenNewsUrls = new Set();
-    for (const side of ["left","centre","right"]) {
-      newsCoverage[side] = newsCoverage[side].filter(item => {
-        if (seenNewsUrls.has(item.url)) return false;
-        seenNewsUrls.add(item.url);
-        return true;
-      });
+      const total = result.left.length+result.centre.length+result.right.length;
+      console.log(`    News: ${total} sources (${result.left.length}L ${result.centre.length}C ${result.right.length}R) in ${((Date.now()-start)/1000).toFixed(1)}s`);
+      return result;
+    } catch(e) {
+      console.warn(`    News search failed: ${e.message}`);
+      return {left:[],centre:[],right:[]};
     }
-    const newsTotal = newsCoverage.left.length + newsCoverage.centre.length + newsCoverage.right.length;
-    console.log(`    News sources: ${newsTotal} (${newsCoverage.left.length}L ${newsCoverage.centre.length}C ${newsCoverage.right.length}R)`);
-  } catch(e) {
-    console.warn(`    News search failed: ${e.message}`);
   }
 
-  await new Promise(r=>setTimeout(r,1000));
+  // ── SEARCH 2: X posts (x_search) ────────────────────────────────────────────
+  async function searchX() {
+    const system = `You are a social media researcher for MIDDLE news app. Search X (formerly Twitter) for real posts about the given political story from the last 24-48 hours. Find posts from both left-leaning and right-leaning political accounts. List each post with its handle, URL, content, and approximate like count.`;
+    const user = `Search X right now for posts about:
+"${story.topic}" (keywords: "${story.searchQuery}")
 
-  // ── Search 2: Reddit posts ──────────────────────────────────────────────────
-  let leftPosts = [], rightPosts = [];
-  try {
-    const redditSystem = `You are a research assistant. Search Reddit RIGHT NOW for real posts about a specific news story. List the posts you find with their exact URLs, titles, and vote counts.`;
+Find the most engaged posts from:
+- LEFT-LEANING accounts: progressive politicians, liberal commentators, left-wing journalists, accounts like @TheDemocrats, progressive media accounts
+- RIGHT-LEANING accounts: conservative politicians, right-wing commentators, conservative journalists, accounts like @GOP, conservative media accounts
 
-    const redditUser = `Today is ${today}. Search Reddit for posts about:
-"${story.topic}"
+For each post found, list:
+HANDLE: [@handle]
+SIDE: [left/right]
+URL: [full X/Twitter post URL]
+TEXT: [post content — first 200 chars]
+LIKES: [approximate like/heart count]
+DATE: [post date]
 
-Search queries to use:
+Focus on posts with high engagement (likes, retweets). Only posts from the last 48 hours.`;
+
+    try {
+      // Use x_search tool with date filter
+      const xTools = [{
+        type: "x_search",
+        from_date: from,
+      }];
+      const text = await callGrok43Search(system, user, 4000, xTools);
+      if (text.length < 20) return {leftPosts:[], rightPosts:[]};
+
+      console.log(`    X search: ${text.length} chars in ${((Date.now()-start)/1000).toFixed(1)}s`);
+      console.log("    X preview: " + text.slice(0,100).replace(/\n/g," "));
+
+      const leftPosts = [], rightPosts = [];
+      let leftIdx = 0, rightIdx = 0;
+
+      // Extract X post URLs — format is twitter.com/*/status/* or x.com/*/status/*
+      const xUrls = extractUrls(text).filter(u =>
+        (u.includes("twitter.com/") || u.includes("x.com/")) && u.includes("/status/")
+      );
+      console.log(`    X /status/ URLs found: ${xUrls.length}`);
+
+      // Parse structured blocks
+      const blocks = text.split(/\n(?=HANDLE:|handle:)/gi);
+      for (const block of blocks) {
+        const handleMatch = block.match(/HANDLE:\s*(@\w+)/i);
+        const titleMatch = null; // regex simplified
+        const textMatch = surrounding.match(/[\s\S]{0,50}text[\s\S]{0,5}([^\n]{10,200})/i) || (surrounding.match(/"([^"]{10,200})"/) );
+        const likesMatch  = block.match(/LIKES?:\s*([\d,kKmM.]+)/i);
+        const sideMatch   = block.match(/SIDE:\s*(left|right)/i);
+
+        if (!textMatch) continue;
+        const url = urlMatch ? urlMatch[1].trim().replace(/[.,;]+$/,"") :
+                    xUrls.find(u=>!leftPosts.concat(rightPosts).some(p=>p.url===u)) || null;
+        if (!url) continue;
+
+        const side = sideMatch ? sideMatch[1].toLowerCase() : "left";
+        const handle = handleMatch ? handleMatch[1] : "@user";
+        const rawLikes = likesMatch ? likesMatch[1].replace(/,/g,"") : "0";
+        const likes = rawLikes.endsWith("k")||rawLikes.endsWith("K")
+          ? Math.round(parseFloat(rawLikes)*1000)
+          : rawLikes.endsWith("m")||rawLikes.endsWith("M")
+            ? Math.round(parseFloat(rawLikes)*1000000)
+            : parseInt(rawLikes)||0;
+
+        const post = {
+          id: side==="left" ? `xl${++leftIdx}` : `xr${++rightIdx}`,
+          handle,
+          source: "X",
+          avatar: handle.replace("@","")[0]?.toUpperCase()||"X",
+          text: textMatch[1].trim().slice(0,280),
+          likes,
+          reposts: 0,
+          url,
+          thread: []
+        };
+
+        if (side==="left"  && leftPosts.length  < 5) leftPosts.push(post);
+        if (side==="right" && rightPosts.length < 5) rightPosts.push(post);
+      }
+
+      // Fallback: if structured parsing got nothing, try raw URL extraction
+      if (!leftPosts.length && !rightPosts.length && xUrls.length > 0) {
+        for (let i=0; i<Math.min(xUrls.length,6); i++) {
+          const side = i%2===0 ? "left" : "right";
+          const surrounding = text.slice(Math.max(0,text.indexOf(xUrls[i])-200), text.indexOf(xUrls[i])+100);
+          const titleMatch = surrounding.match(/"([^"]{10,200})"/) || null;
+
+          const post = {
+            id: side==="left" ? `xl${leftIdx+1}` : `xr${rightIdx+1}`,
+            handle: "@user", source:"X", avatar:"X",
+            text: titleMatch ? titleMatch[1].trim() : "View post on X",
+            likes: 0, reposts: 0, url: xUrls[i], thread: []
+          };
+          if (side==="left")  { leftPosts.push(post);  leftIdx++;  }
+          if (side==="right") { rightPosts.push(post); rightIdx++; }
+        }
+      }
+
+      console.log(`    X posts: ${leftPosts.length} left, ${rightPosts.length} right`);
+      return {leftPosts, rightPosts};
+    } catch(e) {
+      console.warn(`    X search failed: ${e.message}`);
+      return {leftPosts:[], rightPosts:[]};
+    }
+  }
+
+  // ── SEARCH 3: Reddit posts (web_search) ─────────────────────────────────────
+  async function searchReddit() {
+    const system = `You are a social media researcher for MIDDLE news app. Search Reddit for real posts about the given political story. Find posts from both left-leaning and right-leaning subreddits with high upvotes. List each post with its subreddit, URL, title, and upvote count.`;
+    const user = `Search Reddit for posts about:
+"${story.topic}" (keywords: "${story.searchQuery}")
+
+Search queries:
 - site:reddit.com "${story.searchQuery}"
 - site:reddit.com/r/politics "${story.searchQuery}"
 - site:reddit.com/r/conservative "${story.searchQuery}"
@@ -815,74 +878,84 @@ Find real posts from:
 LEFT subreddits: r/politics, r/news, r/worldnews, r/progressive, r/democrats, r/Liberal
 RIGHT subreddits: r/conservative, r/Republican, r/AskConservatives, r/Libertarian
 
-For each post you find, list:
-SUBREDDIT: [r/subreddit]
-URL: [full permalink URL - must contain /comments/]
+For each post, list:
+SUBREDDIT: [r/name]
+URL: [full permalink — must contain /comments/]
 TITLE: [exact post title]
-UPVOTES: [upvote count if available]
+UPVOTES: [count if available]
 SIDE: [left/right based on subreddit]
 
-Only list posts with real /comments/ URLs. Do not invent posts or URLs.`;
+Only real posts with /comments/ in the URL. Do not invent URLs.`;
 
-    const redditText = await callGrok43Search(redditSystem, redditUser, 3000);
-    const redditElapsed = ((Date.now()-start)/1000).toFixed(1);
-    console.log(`    Reddit search done in ${redditElapsed}s (${redditText.length} chars)`);
+    try {
+      const text = await callGrok43Search(system, user, 3000, [{type:"web_search"}]);
+      if (text.length < 20) return {leftPosts:[], rightPosts:[]};
 
-    if (redditText.length > 50) {
-      console.log(`    Reddit text preview: ${redditText.slice(0,150).replace(/\n/g," ")}`);
+      console.log(`    Reddit search: ${text.length} chars in ${((Date.now()-start)/1000).toFixed(1)}s`);
+      console.log("    Reddit preview: " + text.slice(0,100).replace(/\n/g," "));
 
-      // Extract ALL reddit.com/r/*/comments/* URLs from text regardless of format
-      const redditUrls = extractUrls(redditText).filter(u => u.includes("reddit.com") && u.includes("/comments/"));
-      console.log(`    Reddit /comments/ URLs found: ${redditUrls.length}`);
+      const leftPosts = [], rightPosts = [];
+      let leftIdx=0, rightIdx=0;
 
-      let leftIdx = 0, rightIdx = 0;
+      const redditUrls = extractUrls(text).filter(u=>u.includes("reddit.com")&&u.includes("/comments/"));
+      console.log(`    Reddit /comments/ URLs: ${redditUrls.length}`);
+
       for (const url of redditUrls) {
-        // Determine subreddit from URL
         const subMatch = url.match(/reddit\.com\/r\/(\w+)/);
         const sub = subMatch ? `r/${subMatch[1]}` : "r/reddit";
-        const isLeft = /politics|news|worldnews|progressive|democrats|liberal|askpolitics/i.test(sub);
-        const isRight = /conservative|republican|askconservatives|libertarian|conservatives/i.test(sub);
+        const isLeft  = /politics|news|worldnews|progressive|democrats|liberal/i.test(sub);
+        const isRight = /conservative|republican|askconservatives|libertarian/i.test(sub);
         if (!isLeft && !isRight) continue;
         const side = isLeft ? "left" : "right";
 
-        // Find title near URL in text
-        const urlIdx = redditText.indexOf(url);
-        const surrounding = redditText.slice(Math.max(0,urlIdx-300), urlIdx+100);
-        const titleMatch = surrounding.match(/[""]([^"""]{15,200})[""]/) ||
-                           surrounding.match(/title[:\s]+([^\n]{15,200})/i) ||
-                           surrounding.match(/(?:^|\n)([A-Z][^\n]{15,200})(?:\n|$)/m);
-        const title = titleMatch ? titleMatch[1].trim() : `Reddit discussion: ${story.topic}`;
-
-        // Extract upvotes if present
-        const upvMatch = surrounding.match(/(\d[\d,]+)\s*(?:upvotes?|points?|votes?)/i);
-        const upvotes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
+        const urlIdx = text.indexOf(url);
+        const surrounding = text.slice(Math.max(0,urlIdx-300),urlIdx+100);
+        const titleMatch = (text.slice(Math.max(0,text.indexOf(url)-300), text.indexOf(url)).match(/"([^"]{15,200})"/) || [null, null]);
+                           surrounding.match(/[""]([^"""]{15,200})[""]/) ||
+                           null;
+        const upvMatch = surrounding.match(/([\d,]+)\s*(?:upvotes?|points?)/i);
+        const likes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
 
         const post = {
-          id: side === "left" ? `l${++leftIdx}` : `r${++rightIdx}`,
-          handle: sub,
-          source: "Reddit",
-          avatar: sub.replace("r/","")[0].toUpperCase(),
-          text: title,
-          likes: upvotes,
-          reposts: 0,
-          url,
-          thread: []
+          id: side==="left" ? `rl${++leftIdx}` : `rr${++rightIdx}`,
+          handle: sub, source:"Reddit", avatar:sub.replace("r/","")[0]?.toUpperCase()||"R",
+          text: titleMatch ? titleMatch[1].trim() : `Reddit discussion: ${story.topic}`,
+          likes, reposts:0, url, thread:[]
         };
-
         if (side==="left"  && leftPosts.length  < 5) leftPosts.push(post);
         if (side==="right" && rightPosts.length < 5) rightPosts.push(post);
       }
-    }
 
-    console.log(`    Reddit posts: ${leftPosts.length} left, ${rightPosts.length} right`);
-  } catch(e) {
-    console.warn(`    Reddit search failed: ${e.message}`);
+      console.log(`    Reddit posts: ${leftPosts.length} left, ${rightPosts.length} right`);
+      return {leftPosts, rightPosts};
+    } catch(e) {
+      console.warn(`    Reddit search failed: ${e.message}`);
+      return {leftPosts:[], rightPosts:[]};
+    }
   }
 
+  // ── Run all 3 searches in parallel ─────────────────────────────────────────
+  const [newsResult, xResult, redditResult] = await Promise.all([
+    searchNews(),
+    searchX(),
+    searchReddit(),
+  ]);
+
+  // Merge left/right posts: X first (higher quality), then Reddit
+  const leftPosts  = [...xResult.leftPosts,  ...redditResult.leftPosts ].slice(0,5);
+  const rightPosts = [...xResult.rightPosts, ...redditResult.rightPosts].slice(0,5);
+
   const elapsed = ((Date.now()-start)/1000).toFixed(1);
-  console.log(`    Agent 2 total: ${elapsed}s`);
-  return { newsCoverage, leftPosts, rightPosts };
+  const srcCount = newsResult.left.length+newsResult.centre.length+newsResult.right.length;
+  console.log(`    Agent 2 total: ${elapsed}s | ${srcCount} news sources | ${leftPosts.length}L + ${rightPosts.length}R social posts`);
+
+  return {
+    newsCoverage: newsResult,
+    leftPosts,
+    rightPosts,
+  };
 }
+
 
 // ─── AGENT 2 FALLBACK: NEWSAPI HEADLINE MATCHER ───────────────────────────────
 // Used only when Agent 2 web search fails completely
