@@ -801,8 +801,8 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
       const blocks = text.split(/\n(?=HANDLE:|handle:)/gi);
       for (const block of blocks) {
         const handleMatch = block.match(/HANDLE:\s*(@\w+)/i);
-        const titleMatch = null; // regex simplified
-        const textMatch = surrounding.match(/[\s\S]{0,50}text[\s\S]{0,5}([^\n]{10,200})/i) || (surrounding.match(/"([^"]{10,200})"/) );
+        const urlMatch    = block.match(/URL:\s*(https?:\/\/\S+)/i);
+        const textMatch   = block.match(/TEXT:\s*(.{10,280})/i) || block.match(/"([^"]{10,280})"/) || null;
         const likesMatch  = block.match(/LIKES?:\s*([\d,kKmM.]+)/i);
         const sideMatch   = block.match(/SIDE:\s*(left|right)/i);
 
@@ -910,9 +910,9 @@ Only real posts with /comments/ in the URL. Do not invent URLs.`;
 
         const urlIdx = text.indexOf(url);
         const surrounding = text.slice(Math.max(0,urlIdx-300),urlIdx+100);
-        const titleMatch = (text.slice(Math.max(0,text.indexOf(url)-300), text.indexOf(url)).match(/"([^"]{15,200})"/) || [null, null]);
-                           surrounding.match(/[""]([^"""]{15,200})[""]/) ||
-                           null;
+        const titleMatch = surrounding.match(/TITLE:\s*(.{10,200})/i) || surrounding.match(/"([^"]{15,200})"/) || surrounding.match(/([A-Z][^.\n]{15,150})/);
+
+
         const upvMatch = surrounding.match(/([\d,]+)\s*(?:upvotes?|points?)/i);
         const likes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
 
