@@ -806,7 +806,7 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
         const likesMatch  = block.match(/LIKES?:\s*([\d,kKmM.]+)/i);
         const sideMatch   = block.match(/SIDE:\s*(left|right)/i);
 
-        if (!textMatch) continue;
+        if (!textMatch || !textMatch[1]) continue;
         const url = urlMatch ? urlMatch[1].trim().replace(/[.,;]+$/,"") :
                     xUrls.find(u=>!leftPosts.concat(rightPosts).some(p=>p.url===u)) || null;
         if (!url) continue;
@@ -840,13 +840,13 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
       if (!leftPosts.length && !rightPosts.length && xUrls.length > 0) {
         for (let i=0; i<Math.min(xUrls.length,6); i++) {
           const side = i%2===0 ? "left" : "right";
-          const surrounding = text.slice(Math.max(0,text.indexOf(xUrls[i])-200), text.indexOf(xUrls[i])+100);
-          const titleMatch = surrounding.match(/"([^"]{10,200})"/) || null;
-
+          const urlPos = text.indexOf(xUrls[i]);
+          const ctx = urlPos >= 0 ? text.slice(Math.max(0,urlPos-200), urlPos+100) : "";
+          const tMatch = ctx ? (ctx.match(/"([^"]{10,200})"/) || ctx.match(/TEXT:\s*(.{10,200})/i) || null) : null;
           const post = {
             id: side==="left" ? `xl${leftIdx+1}` : `xr${rightIdx+1}`,
             handle: "@user", source:"X", avatar:"X",
-            text: titleMatch ? titleMatch[1].trim() : "View post on X",
+            text: (tMatch && tMatch[1]) ? tMatch[1].trim() : "View post on X",
             likes: 0, reposts: 0, url: xUrls[i], thread: []
           };
           if (side==="left")  { leftPosts.push(post);  leftIdx++;  }
@@ -916,10 +916,13 @@ Only real posts with /comments/ in the URL. Do not invent URLs.`;
         const upvMatch = surrounding.match(/([\d,]+)\s*(?:upvotes?|points?)/i);
         const likes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
 
+        const postText = (titleMatch && titleMatch[1])
+          ? titleMatch[1].trim()
+          : `Reddit discussion: ${story.topic}`;
         const post = {
           id: side==="left" ? `rl${++leftIdx}` : `rr${++rightIdx}`,
           handle: sub, source:"Reddit", avatar:sub.replace("r/","")[0]?.toUpperCase()||"R",
-          text: titleMatch ? titleMatch[1].trim() : `Reddit discussion: ${story.topic}`,
+          text: postText,
           likes, reposts:0, url, thread:[]
         };
         if (side==="left"  && leftPosts.length  < 5) leftPosts.push(post);
