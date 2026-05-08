@@ -501,16 +501,17 @@ async function agentSelector(batch, headlines, excludeTopics=[]) {
     ? `\nAlready covered — do NOT select these topics: ${excludeTopics.slice(0,5).join(" | ")}`
     : "";
 
-  const system = `You are the senior news editor for MIDDLE, a nonpartisan political news app. Your job is to select the 5 most important US political stories of the day from real verified headlines.
+  const hasHeadlines = leftScored.length > 0 || centreTop.length > 0 || rightScored.length > 0;
+
+  const system = `You are the senior news editor for MIDDLE, a nonpartisan political news app. Your job is to select the 5 most important US political stories of the day.
 
 MIDDLE covers: federal legislation, Supreme Court, elections, foreign policy, economy/trade, national security, major political appointments, significant political scandals.
 MIDDLE does NOT cover: celebrity, sports, entertainment, lifestyle, minor state issues, social media posts, memes.
 
 Return ONLY a raw JSON array. No markdown. No commentary.`;
 
-  const user = `Select the 5 most nationally significant political stories from today's headlines.${exclude}
-
-Headlines (★ = covered by BOTH left AND right sources — these are highest priority):
+  const headlinesSection = hasHeadlines
+    ? `Headlines (★ = covered by BOTH left AND right sources — prioritise these):
 
 LEFT-LEANING SOURCES:
 ${fmt(leftScored)}
@@ -521,15 +522,26 @@ ${centreTop.map((h,i)=>`${i+1}. [${h.source}] "${h.title}"`).join("\n")}
 RIGHT-LEANING SOURCES:
 ${fmt(rightScored)}
 
-SELECTION RULES — follow strictly:
-1. Prioritise ★ stories — they have cross-partisan significance
-2. National significance only — affects millions of Americans
-3. Topic diversity — max 1 story per area (1 election, 1 foreign policy, 1 economy etc)
-4. Neutral framing — no loaded partisan language in topic headline
-5. Reality check — only select stories that appear in the headlines above
-6. No invented stories — if you cannot find 5 good stories, return fewer
+SELECTION RULES:
+1. Prioritise ★ stories — cross-partisan significance
+2. Only select stories that appear in the headlines above
+3. National significance only
+4. Topic diversity — max 1 story per area
+5. Neutral framing — no partisan language`
+    : `No pre-fetched headlines available today. Use your knowledge of today's major US political news.
 
-Return exactly 5 items (or fewer if necessary):
+SELECTION RULES:
+1. Select the 5 most nationally significant US political stories happening RIGHT NOW
+2. National significance only — federal legislation, Supreme Court, elections, foreign policy, economy, national security
+3. Topic diversity — cover different areas
+4. Neutral framing — no partisan language in headlines
+5. Real stories only — no invented events`;
+
+  const user = `Select the 5 most nationally significant US political stories for today.${exclude}
+
+${headlinesSection}
+
+Return exactly 5 items:
 [
   {
     "topic": "Neutral compelling headline with specific names",
@@ -587,7 +599,8 @@ Only replace a story if ONE of these specific problems exists:
 
 DO NOT replace stories for any other reason. Especially do NOT replace political stories with health or environment topics.
 
-Any replacement must come from the reference headlines above and be a nationally significant political story.
+Any replacement must come from the reference headlines above (if available) and be a nationally significant political story.
+If no reference headlines were provided, only replace stories that are clearly non-political (celebrity/sports/lifestyle).
 
 Return:
 {
