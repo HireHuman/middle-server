@@ -732,44 +732,47 @@ Only list articles you actually found in search results. Do not invent URLs.`;
     console.log(`    News search done in ${newsElapsed}s (${newsText.length} chars)`);
 
     if (newsText.length > 50) {
-      // Parse structured outlet/url/headline blocks from text
-      const blocks = newsText.split(/\n(?=OUTLET:|outlet:)/gi);
-      for (const block of blocks) {
-        const outletMatch = block.match(/OUTLET:\s*(.+)/i);
-        const urlMatch    = block.match(/URL:\s*(https?:\/\/\S+)/i);
-        const headlineMatch = block.match(/HEADLINE:\s*(.+)/i);
-        const biasMatch   = block.match(/BIAS:\s*(left|centre|center|right)/i);
+      console.log(`    News text preview: ${newsText.slice(0,150).replace(/\n/g," ")}`);
 
-        if (urlMatch && outletMatch) {
-          const url = urlMatch[1].trim().replace(/[.,;]+$/, "");
-          const bias = biasMatch
-            ? (biasMatch[1].toLowerCase() === "center" ? "centre" : biasMatch[1].toLowerCase())
-            : getOutletBias(url);
-          if (!bias) continue;
+      // Strategy 1: Extract ALL URLs from the text and classify by outlet bias
+      // This works regardless of what format Grok uses
+      const allUrls = extractUrls(newsText);
+      console.log(`    URLs found in text: ${allUrls.length}`);
 
-          const item = {
-            outlet: outletMatch[1].trim(),
-            url,
-            headline: headlineMatch ? headlineMatch[1].trim() : outletMatch[1].trim(),
-            bias
-          };
+      for (const url of allUrls) {
+        const bias = getOutletBias(url);
+        if (!bias) continue;
 
-          if (bias === "left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
-          if (bias === "centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
-          if (bias === "right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
-        }
+        // Find the headline near this URL in the text
+        const urlIdx = newsText.indexOf(url);
+        const surrounding = newsText.slice(Math.max(0,urlIdx-200), urlIdx+200);
+        // Look for a quoted title or text before/after the URL
+        const titleMatch = surrounding.match(/[""]([^"""]{10,100})[""]/) ||
+                           surrounding.match(/headline[:\s]+([^\n]{10,100})/i) ||
+                           surrounding.match(/title[:\s]+([^\n]{10,100})/i);
+        const headline = titleMatch ? titleMatch[1].trim() : getOutletName(url);
+
+        const item = { outlet:getOutletName(url), url, headline, bias };
+        if (bias==="left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
+        if (bias==="centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
+        if (bias==="right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
       }
 
-      // If structured parsing found nothing, try extracting raw URLs
-      if (!newsCoverage.left.length && !newsCoverage.centre.length && !newsCoverage.right.length) {
-        const urls = extractUrls(newsText);
-        for (const url of urls) {
+      // Strategy 2: If few URLs found, try structured block parsing as backup
+      if (allUrls.length < 3) {
+        const blocks = newsText.split(/\n\n+/);
+        for (const block of blocks) {
+          const urlMatch = block.match(/https?:\/\/\S+/);
+          if (!urlMatch) continue;
+          const url = urlMatch[0].replace(/[.,;)]+$/, "");
           const bias = getOutletBias(url);
           if (!bias) continue;
-          const item = { outlet:getOutletName(url), url, headline:url, bias };
-          if (bias === "left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
-          if (bias === "centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
-          if (bias === "right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
+          const outletMatch = block.match(/\b(NPR|CNN|BBC|Reuters|AP|Fox News|Breitbart|Politico|Guardian|HuffPost|Axios|Hill|Bloomberg|NBC|CBS|ABC|Vox|Atlantic|Salon|Slate|MSNBC|Examiner|Daily Wire|National Review|Daily Caller|Newsmax|New York Post|New Republic|Mother Jones)\b/i);
+          const outlet = outletMatch ? outletMatch[1] : getOutletName(url);
+          const item = { outlet, url, headline:outlet, bias };
+          if (bias==="left"   && newsCoverage.left.length   < 5) newsCoverage.left.push(item);
+          if (bias==="centre" && newsCoverage.centre.length < 5) newsCoverage.centre.push(item);
+          if (bias==="right"  && newsCoverage.right.length  < 5) newsCoverage.right.push(item);
         }
       }
     }
@@ -814,39 +817,48 @@ Only list posts with real /comments/ URLs. Do not invent posts or URLs.`;
     console.log(`    Reddit search done in ${redditElapsed}s (${redditText.length} chars)`);
 
     if (redditText.length > 50) {
-      const blocks = redditText.split(/\n(?=SUBREDDIT:|subreddit:)/gi);
+      console.log(`    Reddit text preview: ${redditText.slice(0,150).replace(/\n/g," ")}`);
+
+      // Extract ALL reddit.com/r/*/comments/* URLs from text regardless of format
+      const redditUrls = extractUrls(redditText).filter(u => u.includes("reddit.com") && u.includes("/comments/"));
+      console.log(`    Reddit /comments/ URLs found: ${redditUrls.length}`);
+
       let leftIdx = 0, rightIdx = 0;
+      for (const url of redditUrls) {
+        // Determine subreddit from URL
+        const subMatch = url.match(/reddit\.com\/r\/(\w+)/);
+        const sub = subMatch ? `r/${subMatch[1]}` : "r/reddit";
+        const isLeft = /politics|news|worldnews|progressive|democrats|liberal|askpolitics/i.test(sub);
+        const isRight = /conservative|republican|askconservatives|libertarian|conservatives/i.test(sub);
+        if (!isLeft && !isRight) continue;
+        const side = isLeft ? "left" : "right";
 
-      for (const block of blocks) {
-        const subMatch   = block.match(/SUBREDDIT:\s*(r\/\w+)/i);
-        const urlMatch   = block.match(/URL:\s*(https?:\/\/\S+)/i);
-        const titleMatch = block.match(/TITLE:\s*(.+)/i);
-        const upvMatch   = block.match(/UPVOTES?:\s*([\d,]+)/i);
-        const sideMatch  = block.match(/SIDE:\s*(left|right)/i);
+        // Find title near URL in text
+        const urlIdx = redditText.indexOf(url);
+        const surrounding = redditText.slice(Math.max(0,urlIdx-300), urlIdx+100);
+        const titleMatch = surrounding.match(/[""]([^"""]{15,200})[""]/) ||
+                           surrounding.match(/title[:\s]+([^\n]{15,200})/i) ||
+                           surrounding.match(/(?:^|\n)([A-Z][^\n]{15,200})(?:\n|$)/m);
+        const title = titleMatch ? titleMatch[1].trim() : `Reddit discussion: ${story.topic}`;
 
-        if (!urlMatch || !titleMatch) continue;
-        const url = urlMatch[1].trim().replace(/[.,;]+$/, "");
-        if (!url.includes("/comments/")) continue; // must be a real post
-
+        // Extract upvotes if present
+        const upvMatch = surrounding.match(/(\d[\d,]+)\s*(?:upvotes?|points?|votes?)/i);
         const upvotes = upvMatch ? parseInt(upvMatch[1].replace(/,/g,""))||0 : 0;
-        const sub = subMatch ? subMatch[1].trim() : "";
-        const side = sideMatch ? sideMatch[1].toLowerCase() :
-          (sub.match(/politics|news|worldnews|progressive|democrats|liberal/i) ? "left" : "right");
 
         const post = {
           id: side === "left" ? `l${++leftIdx}` : `r${++rightIdx}`,
-          handle: sub || "r/reddit",
+          handle: sub,
           source: "Reddit",
-          avatar: (sub.replace("r/","")[0]||"R").toUpperCase(),
-          text: titleMatch[1].trim(),
+          avatar: sub.replace("r/","")[0].toUpperCase(),
+          text: title,
           likes: upvotes,
           reposts: 0,
           url,
           thread: []
         };
 
-        if (side === "left"  && leftPosts.length  < 5) leftPosts.push(post);
-        if (side === "right" && rightPosts.length < 5) rightPosts.push(post);
+        if (side==="left"  && leftPosts.length  < 5) leftPosts.push(post);
+        if (side==="right" && rightPosts.length < 5) rightPosts.push(post);
       }
     }
 
