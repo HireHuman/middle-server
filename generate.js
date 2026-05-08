@@ -585,7 +585,7 @@ Return ONE JSON object:
   "leftSummary": "3-4 sentences of the STRONGEST honest progressive argument. The best case the left actually makes — not a strawman. Specific policy concerns and values.",
   "rightSummary": "3-4 sentences of the STRONGEST honest conservative argument. The best case the right actually makes — not a strawman. Specific policy concerns and values.",
   "commonGround": ["Specific genuine shared value","Another real area of agreement","Third authentic overlap","Fourth common concern","Fifth shared principle"],
-  "conclusion": "4 paragraphs: (1) Where the left has a legitimate point. (2) Where the right has a legitimate point. (3) Where each side overstates or ignores evidence. (4) What a reasonable path forward looks like.",
+  "conclusion": "6 substantive paragraphs for the Bird's-Eye View editorial:\n(1) What is actually happening — the core verified facts stripped of spin from either side.\n(2) Where the LEFT has a genuinely legitimate point — specific policy concerns backed by evidence, not opinion.\n(3) Where the RIGHT has a genuinely legitimate point — specific policy concerns backed by evidence, not opinion.\n(4) Where each side overstates, cherry-picks, or ignores inconvenient evidence — be specific about what each side is getting wrong.\n(5) What the mainstream media on BOTH sides is missing or underreporting about this story — the real blindspot.\n(6) What a reasonable, evidence-based path forward looks like — not a compromise for its own sake, but what the evidence actually supports.",
   "blindspotLeft": "Specific thing left-leaning media is NOT covering or underplaying about this story.",
   "blindspotRight": "Specific thing right-leaning media is NOT covering or underplaying about this story.",
   "factChecks": [
