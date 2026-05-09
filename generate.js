@@ -693,24 +693,36 @@ async function agentSourceAndRedditFinder(story) {
 
   // ── SEARCH 1: News outlets (web_search) ────────────────────────────────────
   async function searchNews() {
-    const system = `You are a research assistant for MIDDLE news app. Search the web for real news articles published in the last 48 hours about the given story. List each article with its outlet name, URL, and headline. Be specific and factual — only list articles you actually found.`;
+    const system = `You are a research assistant for MIDDLE news app. Search the web for real news articles published in the last 48 hours about the given story. I need coverage from LEFT, CENTRE, and RIGHT outlets. List each article with outlet, URL, headline and bias. Only list articles you actually found.`;
     const user = `Today is ${today}. Search for news articles about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
-Search queries:
-- "${story.searchQuery} ${year}"
-- "${story.topic} news today"
-- site:foxnews.com "${story.searchQuery}"
-- site:npr.org OR site:cnn.com "${story.searchQuery}"
-- site:reuters.com OR site:apnews.com "${story.searchQuery}"
+Run ALL of these targeted searches:
+1. "${story.searchQuery} ${year}"
+2. site:foxnews.com "${story.searchQuery}"
+3. site:breitbart.com "${story.searchQuery}"
+4. site:washingtonexaminer.com OR site:dailywire.com "${story.searchQuery}"
+5. site:npr.org OR site:theguardian.com "${story.searchQuery}"
+6. site:reuters.com OR site:apnews.com "${story.searchQuery}"
+7. site:cnn.com OR site:msnbc.com "${story.searchQuery}"
+8. site:foxnews.com OR site:nypost.com "${story.searchQuery}"
 
-For each article found, list:
-OUTLET: [name]
-URL: [full URL]
-HEADLINE: [exact headline]
-BIAS: [left/centre/right]
+I need articles from ALL THREE sides. Use this exact format:
+OUTLET: Fox News
+URL: https://foxnews.com/exact-url-here
+HEADLINE: Exact article headline
+BIAS: right
 
-Only articles from ${year}. Do not invent URLs.`;
+OUTLET: NPR
+URL: https://npr.org/exact-url-here
+HEADLINE: Exact article headline
+BIAS: left
+
+LEFT outlets: NPR, The Guardian, HuffPost, Politico, Vox, The Atlantic, CNN, Salon, Mother Jones, New Republic, MSNBC
+CENTRE outlets: Reuters, AP, BBC, Axios, The Hill, Bloomberg, CBS News, NBC News, USA Today, Newsweek, PBS
+RIGHT outlets: Fox News, NY Post, Washington Examiner, Daily Wire, Breitbart, National Review, Daily Caller, Newsmax
+
+Only articles from ${year}. Never invent URLs.`;
 
     try {
       const text = await callGrok43Search(system, user, 4000, [{type:"web_search"}]);
@@ -758,23 +770,28 @@ Only articles from ${year}. Do not invent URLs.`;
 
   // ── SEARCH 2: X posts (x_search) ────────────────────────────────────────────
   async function searchX() {
-    const system = `You are a social media researcher for MIDDLE news app. Search X (formerly Twitter) for real posts about the given political story from the last 24-48 hours. Find posts from both left-leaning and right-leaning political accounts. List each post with its handle, URL, content, and approximate like count.`;
+    const system = `You are a social media researcher for MIDDLE news app. Search X (formerly Twitter) RIGHT NOW for real posts about the given story. You MUST find posts from BOTH left-leaning AND right-leaning accounts — this is critical for balance. List each post with handle, URL, text and likes.`;
     const user = `Search X right now for posts about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
-Find the most engaged posts from:
-- LEFT-LEANING accounts: progressive politicians, liberal commentators, left-wing journalists, accounts like @TheDemocrats, progressive media accounts
-- RIGHT-LEANING accounts: conservative politicians, right-wing commentators, conservative journalists, accounts like @GOP, conservative media accounts
+Find at least 3 LEFT-leaning and 3 RIGHT-leaning posts. Use EXACTLY this format for EACH post:
 
-For each post found, list:
-HANDLE: [@handle]
-SIDE: [left/right]
-URL: [full X/Twitter post URL]
-TEXT: [post content — first 200 chars]
-LIKES: [approximate like/heart count]
-DATE: [post date]
+HANDLE: @accountname
+SIDE: left
+URL: https://x.com/accountname/status/REALID
+TEXT: The actual post content here
+LIKES: 4500
 
-Focus on posts with high engagement (likes, retweets). Only posts from the last 48 hours.`;
+HANDLE: @conservativeaccount
+SIDE: right
+URL: https://x.com/conservativeaccount/status/REALID
+TEXT: The actual post content here
+LIKES: 2800
+
+LEFT accounts to search: progressive politicians, @TheDemocrats, liberal journalists, left-wing commentators
+RIGHT accounts to search: @GOP, conservative politicians, @FoxNews, @nypost, right-wing commentators
+
+Rules: Only real posts with real /status/ URLs. High engagement preferred. Last 48 hours only.`;
 
     try {
       // Use x_search tool with date filter
@@ -798,7 +815,9 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
       console.log(`    X /status/ URLs found: ${xUrls.length}`);
 
       // Parse structured blocks
-      const blocks = text.split(/\n(?=HANDLE:|handle:)/gi);
+      // Split on blank lines OR HANDLE: prefix — handles various Grok response formats
+      const blocks = text.split(/\n{2,}|\n(?=HANDLE:|handle:|LEFT POST|RIGHT POST|\*\*HANDLE)/gi)
+                         .filter(b => b.trim().length > 20);
       for (const block of blocks) {
         const handleMatch = block.match(/HANDLE:\s*(@\w+)/i);
         const urlMatch    = block.match(/URL:\s*(https?:\/\/\S+)/i);
@@ -807,8 +826,14 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
         const sideMatch   = block.match(/SIDE:\s*(left|right)/i);
 
         if (!textMatch || !textMatch[1]) continue;
-        const url = urlMatch ? urlMatch[1].trim().replace(/[.,;]+$/,"") :
-                    xUrls.find(u=>!leftPosts.concat(rightPosts).some(p=>p.url===u)) || null;
+        // Try urlMatch first, then find any unused X URL in the block text
+        let url = urlMatch ? urlMatch[1].trim().replace(/[.,;]+$/,"") : null;
+        if (!url) {
+          url = xUrls.find(u =>
+            block.includes(u.slice(-15)) && // URL appears in this block
+            !leftPosts.concat(rightPosts).some(p=>p.url===u)
+          ) || null;
+        }
         if (!url) continue;
 
         const side = sideMatch ? sideMatch[1].toLowerCase() : "left";
@@ -868,24 +893,32 @@ Focus on posts with high engagement (likes, retweets). Only posts from the last 
     const user = `Search Reddit for posts about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
-Search queries:
-- site:reddit.com "${story.searchQuery}"
+Run ALL of these searches:
 - site:reddit.com/r/politics "${story.searchQuery}"
-- site:reddit.com/r/conservative "${story.searchQuery}"
 - site:reddit.com/r/news "${story.searchQuery}"
+- site:reddit.com/r/conservative "${story.searchQuery}"
+- site:reddit.com/r/Republican "${story.searchQuery}"
+- site:reddit.com/r/worldnews "${story.searchQuery}"
+- site:reddit.com/r/AskConservatives "${story.searchQuery}"
 
-Find real posts from:
+I need posts from BOTH sides. For each post found use this EXACT format:
+
+SUBREDDIT: r/politics
+URL: https://www.reddit.com/r/politics/comments/REALID/slug/
+TITLE: Exact title of the post
+UPVOTES: 4500
+SIDE: left
+
+SUBREDDIT: r/conservative
+URL: https://www.reddit.com/r/conservative/comments/REALID/slug/
+TITLE: Exact title of the post
+UPVOTES: 1200
+SIDE: right
+
 LEFT subreddits: r/politics, r/news, r/worldnews, r/progressive, r/democrats, r/Liberal
 RIGHT subreddits: r/conservative, r/Republican, r/AskConservatives, r/Libertarian
 
-For each post, list:
-SUBREDDIT: [r/name]
-URL: [full permalink — must contain /comments/]
-TITLE: [exact post title]
-UPVOTES: [count if available]
-SIDE: [left/right based on subreddit]
-
-Only real posts with /comments/ in the URL. Do not invent URLs.`;
+Only include posts with real /comments/ URLs you actually found. Never invent URLs.`;
 
     try {
       const text = await callGrok43Search(system, user, 3000, [{type:"web_search"}]);
