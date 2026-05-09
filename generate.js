@@ -462,6 +462,12 @@ SELECTION RULES:
 4. Neutral headline framing — rephrase any loaded or partisan language into factual neutral terms
    e.g. "Justice Sam Alito used deceptive DOJ data" → "Report: Alito Relied on Disputed DOJ Data in Voting Rights Case"
    e.g. "Democrats destroy economy" → "Economic Data Sparks Debate Over Policy Impact"
+5. STRICT TOPIC DIVERSITY — maximum 1 story per topic cluster:
+   - REDISTRICTING/ELECTIONS cluster: Virginia redistricting, Tennessee map, primary elections, gerrymandering — pick ONE
+   - IRAN/FOREIGN POLICY cluster: Iran ceasefire, Strait of Hormuz, nuclear deal — pick ONE
+   - TRUMP LEGAL cluster: DOJ cases, Fulton County, election fraud — pick ONE
+   - COURTS cluster: Supreme Court rulings, judicial appointments — pick ONE
+   If you have 2+ stories from the same cluster, replace extras with stories from different topic areas.
 5. National impact — affects millions of Americans or has major political consequences
 
 Return exactly 5 items:
@@ -830,11 +836,13 @@ Only articles from ${year}. Never invent URLs.`;
 
   // ── SEARCH 2: X posts (x_search) ────────────────────────────────────────────
   async function searchX() {
-    const system = `You are a social media researcher for MIDDLE news app. Search X (formerly Twitter) RIGHT NOW for real posts about the given story. You MUST find posts from BOTH left-leaning AND right-leaning accounts — this is critical for balance. List each post with handle, URL, text and likes.`;
+    const system = `You are a social media researcher for MIDDLE news app. Search X (formerly Twitter) RIGHT NOW for the most engaged real posts about the given story. Find the posts with the highest like counts and engagement — political lean does not matter, engagement does. List each post with handle, URL, text and likes.`;
     const user = `Search X right now for posts about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
-Find at least 3 LEFT-leaning and 3 RIGHT-leaning posts. Use EXACTLY this format for EACH post:
+Find the most engaged posts about this story from ANY political accounts — politicians, journalists, commentators, media outlets. Prioritize posts with the HIGHEST likes and engagement regardless of political lean.
+
+Use EXACTLY this format for EACH post:
 
 HANDLE: @accountname
 SIDE: left
@@ -842,16 +850,11 @@ URL: https://x.com/accountname/status/REALID
 TEXT: The actual post content here
 LIKES: 4500
 
-HANDLE: @conservativeaccount
-SIDE: right
-URL: https://x.com/conservativeaccount/status/REALID
-TEXT: The actual post content here
-LIKES: 2800
+Determine SIDE based on the account's known political lean:
+- left: progressive, Democrat-leaning, liberal media accounts
+- right: conservative, Republican-leaning, right-wing media accounts
 
-LEFT accounts to search: progressive politicians, @TheDemocrats, liberal journalists, left-wing commentators
-RIGHT accounts to search: @GOP, conservative politicians, @FoxNews, @nypost, right-wing commentators
-
-Rules: Only real posts with real /status/ URLs. High engagement preferred. Last 48 hours only.`;
+Rules: Only real posts with real /status/ URLs. Last 48 hours only. Find up to 6 posts total. High engagement first.`;
 
     try {
       // Use x_search tool with date filter
@@ -949,19 +952,19 @@ Rules: Only real posts with real /status/ URLs. High engagement preferred. Last 
 
   // ── SEARCH 3: Reddit posts (web_search) ─────────────────────────────────────
   async function searchReddit() {
-    const system = `You are a social media researcher for MIDDLE news app. Search Reddit for real posts about the given political story. Find posts from both left-leaning and right-leaning subreddits with high upvotes. List each post with its subreddit, URL, title, and upvote count.`;
+    const system = `You are a social media researcher for MIDDLE news app. Search Reddit for the most upvoted real posts about the given story. Find the posts with the highest upvote counts from any subreddit — political lean does not matter, engagement does. List each post with its subreddit, URL, title, and upvote count.`;
     const user = `Search Reddit for posts about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
-Run ALL of these searches:
+Run ALL of these searches and return the highest-engagement posts:
+- site:reddit.com "${story.searchQuery}"
 - site:reddit.com/r/politics "${story.searchQuery}"
 - site:reddit.com/r/news "${story.searchQuery}"
+- site:reddit.com/r/worldnews "${story.searchQuery}"
 - site:reddit.com/r/conservative "${story.searchQuery}"
 - site:reddit.com/r/Republican "${story.searchQuery}"
-- site:reddit.com/r/worldnews "${story.searchQuery}"
-- site:reddit.com/r/AskConservatives "${story.searchQuery}"
 
-I need posts from BOTH sides. For each post found use this EXACT format:
+Find the most upvoted posts about this story from ANY subreddit. Prioritize posts with the HIGHEST upvote counts regardless of subreddit lean. For each post found use this EXACT format:
 
 SUBREDDIT: r/politics
 URL: https://www.reddit.com/r/politics/comments/REALID/slug/
@@ -1037,9 +1040,14 @@ Only include posts with real /comments/ URLs you actually found. Never invent UR
     searchReddit(),
   ]);
 
-  // Merge left/right posts: X first (higher quality), then Reddit
-  const leftPosts  = [...xResult.leftPosts,  ...redditResult.leftPosts ].slice(0,5);
-  const rightPosts = [...xResult.rightPosts, ...redditResult.rightPosts].slice(0,5);
+  // Merge all posts - X first (higher authority), then Reddit
+  // Sort by engagement (likes) within each side — no artificial balance
+  const allLeft  = [...xResult.leftPosts,  ...redditResult.leftPosts ]
+    .sort((a,b) => (b.likes||0) - (a.likes||0)).slice(0,6);
+  const allRight = [...xResult.rightPosts, ...redditResult.rightPosts]
+    .sort((a,b) => (b.likes||0) - (a.likes||0)).slice(0,6);
+  const leftPosts  = allLeft;
+  const rightPosts = allRight;
 
   const elapsed = ((Date.now()-start)/1000).toFixed(1);
   const srcCount = newsResult.left.length+newsResult.centre.length+newsResult.right.length;
@@ -1430,6 +1438,9 @@ async function main() {
 
   console.log("\n" + all.length + " stories published for " + today);
   console.log(totalSrc + " verified news sources");
+  console.log("  Left: " + all.reduce((s,x)=>s+(x.newsCoverage?.left?.length||0),0) +
+              " | Center: " + all.reduce((s,x)=>s+(x.newsCoverage?.centre?.length||0),0) +
+              " | Right: " + all.reduce((s,x)=>s+(x.newsCoverage?.right?.length||0),0));
   console.log(totalX + " X posts (" + totalXL + "L " + totalXR + "R)");
   console.log(totalReddit + " Reddit posts (" + totalRdL + "L " + totalRdR + "R)");
   console.log(all.filter(s=>s.imageUrl).length + "/" + all.length + " stories with images");
