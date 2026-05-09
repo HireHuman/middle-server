@@ -256,23 +256,18 @@ async function validateCoverage(coverage) {
       try {
         const host = new URL(item.url).hostname.replace("www.","");
         if (TRUSTED_DOMAINS.some(d => host.includes(d))) {
-          // Still do a HEAD check for trusted domains to catch hallucinated URLs
-          // Use short timeout so it doesn't slow the pipeline much
-          const lib2 = item.url.startsWith("https") ? https : http;
-          const ok2 = await new Promise(resolve => {
-            const req2 = lib2.request(item.url, {
-              method:"HEAD", timeout:5000,
-              headers:{"User-Agent":"Mozilla/5.0 (compatible; MIDDLE-App/1.0)"}
-            }, res2 => resolve(res2.statusCode < 400));
-            req2.on("error", ()=>resolve(false));
-            req2.on("timeout", ()=>{ req2.destroy(); resolve(false); });
-            req2.end();
-          });
-          if (!ok2) {
-            console.log(`  DEAD: ${item.outlet} — ${item.url.slice(0,60)}`);
+          // Major outlets block automated HEAD requests — trust the URL structure instead
+          // Validate it looks like a real article URL (has meaningful path, no truncation)
+          const u = new URL(item.url);
+          if (u.pathname.length < 5) {
+            console.log(`  SKIPPED: ${item.outlet} — root URL, not an article`);
             return null;
           }
-          console.log(`  VALID: ${item.outlet}`);
+          if (item.url.includes("...") || item.url.includes(" ")) {
+            console.log(`  SKIPPED: ${item.outlet} — malformed URL`);
+            return null;
+          }
+          console.log(`  TRUSTED: ${item.outlet}`);
           return item;
         }
         const { default: https } = await import('https');
@@ -794,6 +789,34 @@ Only articles from ${year}. Never invent URLs.`;
           seen.add(i.url);
           return true;
         });
+      }
+
+      // Second pass: ask Grok to verify each URL is real and accessible
+      // This catches hallucinated URLs that look plausible but don't exist
+      const allFound = [...result.left,...result.centre,...result.right];
+      if (allFound.length > 0) {
+        try {
+          const urlList = allFound.map((item,i)=>`${i}. ${item.outlet}: ${item.url}`).join("\n");
+          const verifyText = await callGrok43Search(
+            `You are a URL verifier. For each URL below, search the web to confirm it actually exists and leads to a real news article about the given topic. Return ONLY a JSON array of indices that are VALID (the article exists). Be strict — if you cannot confirm a URL exists in search results, exclude it.`,
+            `Topic: "${story.topic}"\n\nURLs to verify:\n${urlList}\n\nReturn JSON array of valid indices, e.g. [0, 2, 4]`,
+            2000,
+            [{type:"web_search"}]
+          );
+          const validIndices = new Set(parseJSON(verifyText) || []);
+          if (validIndices.size > 0) {
+            let idx = 0;
+            for (const side of ["left","centre","right"]) {
+              result[side] = result[side].filter(item => {
+                const globalIdx = allFound.indexOf(item);
+                return validIndices.has(globalIdx);
+              });
+            }
+            console.log("    URL verification: " + validIndices.size + "/" + allFound.length + " confirmed real");
+          }
+        } catch(e) {
+          console.warn("    URL verification skipped: " + e.message);
+        }
       }
 
       const total = result.left.length+result.centre.length+result.right.length;

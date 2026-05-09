@@ -6,5 +6,7 @@ startCommand = "node generate.js"
 restartPolicyType = "NEVER"
 
 [[cronJobs]]
-schedule = "0 5 * * *"
+# Runs at 4:00 AM UTC = 12:00 AM Eastern (midnight Ontario)
+# Stories ready fresh every morning when users wake up
+schedule = "0 4 * * *"
 command = "node generate.js"
