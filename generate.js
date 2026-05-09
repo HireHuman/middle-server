@@ -448,7 +448,9 @@ SELECTION RULES:
 1. ★ stories are highest priority — covered by both sides means national significance
 2. Topic diversity — select from different areas: foreign policy, economy, courts, elections, legislation, appointments
 3. No more than 2 stories on the same broad topic
-4. Neutral headline framing — no loaded language, no partisan spin
+4. Neutral headline framing — rephrase any loaded or partisan language into factual neutral terms
+   e.g. "Justice Sam Alito used deceptive DOJ data" → "Report: Alito Relied on Disputed DOJ Data in Voting Rights Case"
+   e.g. "Democrats destroy economy" → "Economic Data Sparks Debate Over Policy Impact"
 5. National impact — affects millions of Americans or has major political consequences
 
 Return exactly 5 items:
@@ -506,6 +508,12 @@ ONLY replace a story if it has ONE of these specific problems:
 2. Clearly only a local/state issue with zero national implications
 3. Celebrity, sports, entertainment, or non-political content
 4. More than 2 stories covering the exact same event
+
+ALSO check topic framing — if a topic headline uses loaded or partisan language, CORRECT THE FRAMING without replacing the story:
+- "Justice Alito used deceptive data" → "Report: Alito Relied on Disputed Data in Voting Rights Ruling"
+- "Trump destroys..." → "Trump Administration Changes Policy on..."
+- "Democrats refuse to..." → "Democrats Oppose..."
+Framing must be neutral — a conservative and a liberal should both find the headline fair.
 
 DO NOT replace for any other reason. Political stories about Trump, Congress, courts, elections are ALL valid — do not filter them out.
 
@@ -589,16 +597,16 @@ Return ONE JSON object. CRITICAL FOR FACT CHECKS: Select the largest real claims
   "blindspotLeft": "Specific thing left-leaning media is NOT covering or underplaying about this story.",
   "blindspotRight": "Specific thing right-leaning media is NOT covering or underplaying about this story.",
   "factChecks": [
-    {"claim":"The single most prominent specific claim conservatives ARE making about this story right now","side":"right","verdict":"[TRUE/FALSE/MISLEADING/UNVERIFIED based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of specific evidence for this verdict.","likes":0},
-    {"claim":"The single most prominent specific claim liberals ARE making about this story right now","side":"left","verdict":"[TRUE/FALSE/MISLEADING/UNVERIFIED based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of specific evidence for this verdict.","likes":0},
-    {"claim":"Second most prominent conservative claim — specific and real","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Second most prominent liberal claim — specific and real","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Third conservative claim — specific verifiable statement","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Third liberal claim — specific verifiable statement","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Fourth conservative claim","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Fourth liberal claim","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Fifth conservative claim","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
-    {"claim":"Fifth liberal claim","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0}
+    {"claim":"The single biggest specific claim conservatives are actually making about this story","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of specific evidence.","likes":0},
+    {"claim":"The single biggest specific claim liberals are actually making about this story","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of specific evidence.","likes":0},
+    {"claim":"Second biggest conservative claim — specific and verifiable","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Second biggest liberal claim — specific and verifiable","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Third conservative claim — something conservatives are saying right now","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Third liberal claim — something liberals are saying right now","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fourth conservative claim","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fourth liberal claim","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fifth conservative claim","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fifth liberal claim","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of evidence.","likes":0}
   ],
   "leftPosts": [],
   "rightPosts": [],
@@ -1095,6 +1103,16 @@ Only correct genuine errors. If everything is accurate, return approved: true wi
       }
       const old = story.factChecks[fix.index][fix.field];
       story.factChecks[fix.index][fix.field] = fix.newValue;
+      // Keep color in sync with verdict
+      if (fix.field === "verdict") {
+        const VERDICT_COLORS = {
+          TRUE: "#10b981", FALSE: "#ef4444",
+          MISLEADING: "#f59e0b", UNVERIFIED: "#a78bfa"
+        };
+        if (VERDICT_COLORS[fix.newValue]) {
+          story.factChecks[fix.index].color = VERDICT_COLORS[fix.newValue];
+        }
+      }
       console.log(`    Fixed [${fix.index}] ${fix.field}: ${old} → ${fix.newValue}`);
     }
     story.verifierNotes = review.checkerNote||"";
@@ -1195,6 +1213,17 @@ async function processBatch(batchNum, headlines, excludeTopics=[], globalUsedUrl
       const ws = Date.now();
       story = await agentWriter(meta);
       console.log(`  1B done in ${((Date.now()-ws)/1000).toFixed(1)}s`);
+
+      // Normalize fact check colors to match verdicts (in case writer used wrong color)
+      const VERDICT_COLORS = {
+        TRUE:"#10b981", FALSE:"#ef4444", MISLEADING:"#f59e0b", UNVERIFIED:"#a78bfa"
+      };
+      (story.factChecks||[]).forEach(fc => {
+        if (fc && fc.verdict && VERDICT_COLORS[fc.verdict]) {
+          fc.color = VERDICT_COLORS[fc.verdict];
+        }
+      });
+
     } catch(e) {
       console.warn(`  1B failed: ${e.message} — skipping story`);
       continue;
@@ -1325,11 +1354,34 @@ async function main() {
   }, 0);
 
   console.log("\n=== DONE ===");
-  console.log(`${all.length} stories published for ${today}`);
-  console.log(`${totalSrc} verified news sources`);
-  console.log(`${totalReddit} real Reddit posts`);
-  console.log(`${all.filter(s=>s.imageUrl).length}/10 stories with images`);
-  console.log(`Average quality score: ${(all.reduce((s,x)=>s+(x.qualityScore||0),0)/Math.max(all.length,1)).toFixed(1)}/10`);
+  const totalX = all.reduce((s,x) => {
+    return s + (x.leftPosts||[]).filter(p=>p.source==="X").length
+             + (x.rightPosts||[]).filter(p=>p.source==="X").length;
+  }, 0);
+  const totalXL = all.reduce((s,x)=>s+(x.leftPosts||[]).filter(p=>p.source==="X").length,0);
+  const totalXR = all.reduce((s,x)=>s+(x.rightPosts||[]).filter(p=>p.source==="X").length,0);
+  const totalRdL = all.reduce((s,x)=>s+(x.leftPosts||[]).filter(p=>p.source==="Reddit").length,0);
+  const totalRdR = all.reduce((s,x)=>s+(x.rightPosts||[]).filter(p=>p.source==="Reddit").length,0);
+
+  // Per-story breakdown
+  console.log("\nSTORY BREAKDOWN:");
+  all.forEach((s,i) => {
+    const c = s.newsCoverage||{};
+    const src = (c.left?.length||0)+(c.centre?.length||0)+(c.right?.length||0);
+    const xL  = (s.leftPosts||[]).filter(p=>p.source==="X").length;
+    const xR  = (s.rightPosts||[]).filter(p=>p.source==="X").length;
+    const rdL = (s.leftPosts||[]).filter(p=>p.source==="Reddit").length;
+    const rdR = (s.rightPosts||[]).filter(p=>p.source==="Reddit").length;
+    const line = "  "+(i+1)+". "+s.topic.slice(0,45).padEnd(45)+" | news:"+src+"("+(c.left?.length||0)+"L"+(c.centre?.length||0)+"C"+(c.right?.length||0)+"R) | X:"+xL+"L"+xR+"R | rd:"+rdL+"L"+rdR+"R | "+(s.imageUrl?"img✅":"img❌")+" | "+(s.qualityScore||"?")+"/10";
+    console.log(line);
+  });
+
+  console.log("\n" + all.length + " stories published for " + today);
+  console.log(totalSrc + " verified news sources");
+  console.log(totalX + " X posts (" + totalXL + "L " + totalXR + "R)");
+  console.log(totalReddit + " Reddit posts (" + totalRdL + "L " + totalRdR + "R)");
+  console.log(all.filter(s=>s.imageUrl).length + "/" + all.length + " stories with images");
+  console.log("Average quality score: " + (all.reduce((s,x)=>s+(x.qualityScore||0),0)/Math.max(all.length,1)).toFixed(1) + "/10");
   console.log("Finished: " + new Date().toISOString());
 }
 
