@@ -256,7 +256,23 @@ async function validateCoverage(coverage) {
       try {
         const host = new URL(item.url).hostname.replace("www.","");
         if (TRUSTED_DOMAINS.some(d => host.includes(d))) {
-          console.log(`  TRUSTED: ${item.outlet}`);
+          // Still do a HEAD check for trusted domains to catch hallucinated URLs
+          // Use short timeout so it doesn't slow the pipeline much
+          const lib2 = item.url.startsWith("https") ? https : http;
+          const ok2 = await new Promise(resolve => {
+            const req2 = lib2.request(item.url, {
+              method:"HEAD", timeout:5000,
+              headers:{"User-Agent":"Mozilla/5.0 (compatible; MIDDLE-App/1.0)"}
+            }, res2 => resolve(res2.statusCode < 400));
+            req2.on("error", ()=>resolve(false));
+            req2.on("timeout", ()=>{ req2.destroy(); resolve(false); });
+            req2.end();
+          });
+          if (!ok2) {
+            console.log(`  DEAD: ${item.outlet} — ${item.url.slice(0,60)}`);
+            return null;
+          }
+          console.log(`  VALID: ${item.outlet}`);
           return item;
         }
         const { default: https } = await import('https');
@@ -695,13 +711,19 @@ async function agentSourceAndRedditFinder(story) {
   // Helper: extract URLs from natural language response
   function extractUrls(text) {
     return (text.match(/https?:\/\/[^\s)\],"'<>]+/g)||[])
-      .map(u=>u.replace(/[.,;:!?)]+$/,""))
-      .filter(u=>u.length>20);
+      .map(u => u.replace(/[.,;:!?)’”]+$/, ""))
+      .filter(u => {
+        if (u.length < 25) return false;        // too short to be real
+        if (u.includes("...")) return false;    // truncated URL
+        if (u.endsWith("/")) return true;       // root URLs OK
+        if (!/\.[a-z]{2,6}(\/|$)/i.test(u)) return false; // needs valid TLD
+        return true;
+      });
   }
 
   // ── SEARCH 1: News outlets (web_search) ────────────────────────────────────
   async function searchNews() {
-    const system = `You are a research assistant for MIDDLE news app. Search the web for real news articles published in the last 48 hours about the given story. I need coverage from LEFT, CENTRE, and RIGHT outlets. List each article with outlet, URL, headline and bias. Only list articles you actually found.`;
+    const system = `You are a research assistant for MIDDLE news app. Search the web RIGHT NOW for real news articles about the given story. CRITICAL: Only return URLs that you have personally verified exist in your search results. Do not construct or guess URLs from memory — only copy URLs exactly as they appear in search results. A working URL is essential — dead links destroy user trust.`;
     const user = `Today is ${today}. Search for news articles about:
 "${story.topic}" (keywords: "${story.searchQuery}")
 
@@ -758,17 +780,24 @@ Only articles from ${year}. Never invent URLs.`;
         if (bias==="right" &&result.right.length  <6) result.right.push(item);
       }
 
-      // Dedup
+      // Dedup and validate URL structure
       const seen = new Set();
       for (const side of ["left","centre","right"]) {
         result[side] = result[side].filter(i=>{
-          if (seen.has(i.url)) return false;
-          seen.add(i.url); return true;
+          if (!i.url || seen.has(i.url)) return false;
+          // Must have a real article path — not just a domain root
+          try {
+            const u = new URL(i.url);
+            if (u.pathname.length < 4) return false; // just "/" or "/en" — not a real article
+            if (i.url.includes("...")) return false;  // truncated
+          } catch(e) { return false; }
+          seen.add(i.url);
+          return true;
         });
       }
 
       const total = result.left.length+result.centre.length+result.right.length;
-      console.log(`    News: ${total} sources (${result.left.length}L ${result.centre.length}C ${result.right.length}R) in ${((Date.now()-start)/1000).toFixed(1)}s`);
+      console.log("    News: "+total+" sources ("+result.left.length+"L "+result.centre.length+"C "+result.right.length+"R) in "+((Date.now()-start)/1000).toFixed(1)+"s");
       return result;
     } catch(e) {
       console.warn(`    News search failed: ${e.message}`);
