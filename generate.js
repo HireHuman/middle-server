@@ -570,7 +570,7 @@ Return ONLY a raw JSON object. No markdown. No code fences. Escape all strings p
 "${storyMeta.topic}"
 Search keywords: "${storyMeta.searchQuery}"
 
-Return ONE JSON object:
+Return ONE JSON object. CRITICAL FOR FACT CHECKS: Select the largest real claims each side is making. Assign verdicts based ONLY on evidence and facts — never pre-balance or artificially distribute verdicts. Transparency is the entire point.
 {
   "id": "unique-kebab-slug",
   "topic": "${storyMeta.topic}",
@@ -589,16 +589,16 @@ Return ONE JSON object:
   "blindspotLeft": "Specific thing left-leaning media is NOT covering or underplaying about this story.",
   "blindspotRight": "Specific thing right-leaning media is NOT covering or underplaying about this story.",
   "factChecks": [
-    {"claim":"Specific verifiable claim conservatives ARE making about this right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of specific evidence.","likes":18400},
-    {"claim":"Specific verifiable claim liberals ARE making about this right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of specific evidence.","likes":14200},
-    {"claim":"Specific verifiable claim conservatives ARE making about this right now","side":"right","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of specific evidence.","likes":22800},
-    {"claim":"Specific verifiable claim liberals ARE making about this right now","side":"left","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of specific evidence.","likes":16400},
-    {"claim":"Specific verifiable claim conservatives ARE making about this right now","side":"right","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of specific evidence.","likes":11200},
-    {"claim":"Specific verifiable claim liberals ARE making about this right now","side":"left","verdict":"FALSE","color":"#ef4444","explanation":"2-3 sentences of specific evidence.","likes":19800},
-    {"claim":"Specific verifiable claim conservatives ARE making about this right now","side":"right","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of specific evidence.","likes":13400},
-    {"claim":"Specific verifiable claim liberals ARE making about this right now","side":"left","verdict":"UNVERIFIED","color":"#a78bfa","explanation":"2-3 sentences of specific evidence.","likes":9800},
-    {"claim":"Specific verifiable claim conservatives ARE making about this right now","side":"right","verdict":"TRUE","color":"#10b981","explanation":"2-3 sentences of specific evidence.","likes":21200},
-    {"claim":"Specific verifiable claim liberals ARE making about this right now","side":"left","verdict":"MISLEADING","color":"#f59e0b","explanation":"2-3 sentences of specific evidence.","likes":12800}
+    {"claim":"The single most prominent specific claim conservatives ARE making about this story right now","side":"right","verdict":"[TRUE/FALSE/MISLEADING/UNVERIFIED based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of specific evidence for this verdict.","likes":0},
+    {"claim":"The single most prominent specific claim liberals ARE making about this story right now","side":"left","verdict":"[TRUE/FALSE/MISLEADING/UNVERIFIED based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of specific evidence for this verdict.","likes":0},
+    {"claim":"Second most prominent conservative claim — specific and real","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Second most prominent liberal claim — specific and real","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Third conservative claim — specific verifiable statement","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Third liberal claim — specific verifiable statement","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fourth conservative claim","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fourth liberal claim","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fifth conservative claim","side":"right","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0},
+    {"claim":"Fifth liberal claim","side":"left","verdict":"[verdict based purely on evidence]","color":"#10b981","explanation":"2-3 sentences of evidence.","likes":0}
   ],
   "leftPosts": [],
   "rightPosts": [],
@@ -1053,9 +1053,11 @@ RULES:
 - side="left" means liberals/Democrats are actually making this claim — verify
 - Valid sides: "left" or "right" ONLY — never "neutral", "both", or anything else
 - Valid verdicts: "TRUE" "FALSE" "MISLEADING" "UNVERIFIED" only
-- Aim for a healthy mix: roughly 3-4 TRUE, 2-3 MISLEADING, 1-2 FALSE, 1-2 UNVERIFIED
-- Claims must be SPECIFIC — flag vague or invented claims
-- Check that each claim is genuinely something that side is saying RIGHT NOW`;
+- Claims must be SPECIFIC and REAL — something that side is genuinely saying right now
+- Verdicts must reflect reality ONLY — do NOT balance verdicts artificially
+- If one side is making more false claims, mark them FALSE. If both sides are accurate, mark them TRUE
+- Never adjust a verdict to create balance — that is its own form of bias
+- The fact checks must be completely transparent and evidence-based, full stop`;
 
   const user = `Story: "${story.topic}"
 
